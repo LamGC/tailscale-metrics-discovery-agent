@@ -6,6 +6,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
 	"github.com/lamgc/tailscale-service-discovery-agent/internal/daemon"
@@ -237,6 +238,38 @@ func proxyRemoveCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&socket, "socket", "", "Management socket path")
 	return cmd
+}
+
+// printAgentTailscaleStatus prints a human-readable Tailscale status block.
+func printAgentTailscaleStatus(ts *protocol.TailscaleStatus) {
+	if ts == nil {
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	fmt.Fprintln(os.Stdout, "Tailscale:")
+	if ts.Error != "" {
+		fmt.Fprintf(os.Stdout, "  State:   %s (%s)\n", ts.BackendState, ts.Error)
+		return
+	}
+	stateStr := ts.BackendState
+	if ts.Connected {
+		stateStr = color.GreenString(stateStr)
+	} else {
+		stateStr = color.YellowString(stateStr)
+	}
+	fmt.Fprintf(os.Stdout, "  State:   %s\n", stateStr)
+	if ts.Account != "" {
+		fmt.Fprintf(os.Stdout, "  Account: %s\n", ts.Account)
+	}
+	if ts.Hostname != "" {
+		fmt.Fprintf(os.Stdout, "  Node:    %s\n", ts.Hostname)
+	}
+	for _, ip := range ts.TailscaleIPs {
+		fmt.Fprintf(os.Stdout, "  IP:      %s\n", ip)
+	}
+	for _, tag := range ts.Tags {
+		fmt.Fprintf(os.Stdout, "  Tag:     %s\n", tag)
+	}
 }
 
 // --- helpers ---

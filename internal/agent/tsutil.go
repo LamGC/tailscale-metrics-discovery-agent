@@ -5,6 +5,9 @@ import (
 	"fmt"
 
 	"tailscale.com/client/local"
+
+	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/lamgc/tailscale-service-discovery-agent/internal/tsutil"
 )
 
 // detectSelfTailscaleIP returns the first IPv4 address assigned to this node
@@ -25,4 +28,10 @@ func detectSelfTailscaleIP() (string, error) {
 		return st.TailscaleIPs[0].String(), nil
 	}
 	return "", fmt.Errorf("no Tailscale IPs assigned")
+}
+
+// agentTailscaleStatus returns the current Tailscale daemon state for the agent node.
+func agentTailscaleStatus(ctx context.Context) *protocol.TailscaleStatus {
+	var lc local.Client
+	return tsutil.QueryStatus(ctx, &lc)
 }

@@ -15,7 +15,8 @@ func newCentralMgmtServer(s *Server) *http.Server {
 
 	// GET /status
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, protocol.StatusResponse{Running: true, Info: "central"})
+		ts := s.col.discoverer.TailscaleStatus(r.Context())
+		writeJSON(w, protocol.StatusResponse{Running: true, Info: "central", Tailscale: ts})
 	})
 
 	// GET /peers — full peer list with health status

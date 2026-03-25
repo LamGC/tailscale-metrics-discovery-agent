@@ -32,6 +32,7 @@ type collector struct {
 	mu      sync.RWMutex
 	peers   []protocol.PeerInfo // full peer list with health status
 	targets []protocol.SDTarget // aggregated from healthy peers only
+	tsDown  bool                // true when the last Discover() call failed
 
 	manualMu    sync.RWMutex
 	manualPeers map[string]manualPeer // keyed by Tailscale IP / address
@@ -53,16 +54,25 @@ func (c *collector) Run(ctx context.Context, interval time.Duration) {
 
 	// WatchIPNBus goroutine; auto-restarts on disconnect.
 	go func() {
+		lastFailed := false
 		for ctx.Err() == nil {
-			c.discoverer.Watch(ctx, func() {
-				select {
-				case triggerCh <- struct{}{}:
-				default: // refresh already queued
-				}
-			})
+			connected := c.discoverer.Watch(ctx,
+				func() { // onConnect: called immediately after WatchIPNBus succeeds
+					if lastFailed {
+						log.Printf("central: reconnected to Tailscale IPN bus")
+					}
+				},
+				func() { // onchange: called on netmap change
+					select {
+					case triggerCh <- struct{}{}:
+					default: // refresh already queued
+					}
+				},
+			)
 			if ctx.Err() != nil {
 				return
 			}
+			lastFailed = !connected
 			// Brief pause before reconnecting after a Watch error.
 			select {
 			case <-ctx.Done():
@@ -173,8 +183,18 @@ type peerResult struct {
 func (c *collector) refresh(ctx context.Context) {
 	autoPeers, err := c.discoverer.Discover(ctx)
 	if err != nil {
+		c.mu.Lock()
+		c.tsDown = true
+		c.mu.Unlock()
 		log.Printf("central: discovery error: %v", err)
 		return
+	}
+	c.mu.Lock()
+	wasDown := c.tsDown
+	c.tsDown = false
+	c.mu.Unlock()
+	if wasDown {
+		log.Printf("central: reconnected to Tailscale, resuming discovery")
 	}
 
 	peers := c.mergePeers(autoPeers)

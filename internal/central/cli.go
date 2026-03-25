@@ -24,6 +24,7 @@ func CLIStatus(socketPath string) error {
 		return fmt.Errorf("could not reach central daemon: %w", err)
 	}
 	fmt.Fprintln(os.Stdout, "Central daemon is running.")
+	printTailscaleStatus(st.Tailscale)
 	return nil
 }
 
@@ -194,6 +195,38 @@ func colorSource(s protocol.PeerSource) string {
 		return color.MagentaString("manual")
 	default:
 		return string(s)
+	}
+}
+
+// printTailscaleStatus prints a human-readable Tailscale status block.
+func printTailscaleStatus(ts *protocol.TailscaleStatus) {
+	if ts == nil {
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	fmt.Fprintln(os.Stdout, "Tailscale:")
+	if ts.Error != "" {
+		fmt.Fprintf(os.Stdout, "  State:   %s (%s)\n", ts.BackendState, ts.Error)
+		return
+	}
+	stateStr := ts.BackendState
+	if ts.Connected {
+		stateStr = color.GreenString(stateStr)
+	} else {
+		stateStr = color.YellowString(stateStr)
+	}
+	fmt.Fprintf(os.Stdout, "  State:   %s\n", stateStr)
+	if ts.Account != "" {
+		fmt.Fprintf(os.Stdout, "  Account: %s\n", ts.Account)
+	}
+	if ts.Hostname != "" {
+		fmt.Fprintf(os.Stdout, "  Node:    %s\n", ts.Hostname)
+	}
+	for _, ip := range ts.TailscaleIPs {
+		fmt.Fprintf(os.Stdout, "  IP:      %s\n", ip)
+	}
+	for _, tag := range ts.Tags {
+		fmt.Fprintf(os.Stdout, "  Tag:     %s\n", tag)
 	}
 }
 

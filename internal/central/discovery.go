@@ -11,6 +11,7 @@ import (
 	"tailscale.com/ipn"
 
 	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/lamgc/tailscale-service-discovery-agent/internal/tsutil"
 )
 
 // discoverer queries the local Tailscale daemon and returns peers that carry
@@ -47,6 +48,11 @@ func toTagSet(tags []string) map[string]struct{} {
 		s[t] = struct{}{}
 	}
 	return s
+}
+
+// TailscaleStatus returns the current Tailscale daemon state for this node.
+func (d *discoverer) TailscaleStatus(ctx context.Context) *protocol.TailscaleStatus {
+	return tsutil.QueryStatus(ctx, &d.lc)
 }
 
 // Discover returns all online peers that have at least one matching tag.
@@ -92,27 +98,33 @@ func (d *discoverer) Discover(ctx context.Context) ([]protocol.PeerInfo, error) 
 
 // Watch listens on the Tailscale IPN bus and calls onchange whenever the
 // network map changes (peer comes online, goes offline, etc.).
+// onConnect is called once immediately after WatchIPNBus connects (may be nil).
 // It blocks until ctx is cancelled or a fatal error occurs, then returns
 // so the caller can retry.
-func (d *discoverer) Watch(ctx context.Context, onchange func()) {
+// Returns true if WatchIPNBus connected successfully (even if it later
+// disconnected), false if it could not connect at all.
+func (d *discoverer) Watch(ctx context.Context, onConnect func(), onchange func()) bool {
 	// NotifyInitialNetMap: receive current netmap on connect.
 	// NotifyRateLimit: avoid flooding on rapid sequential changes.
 	const mask = ipn.NotifyInitialNetMap | ipn.NotifyRateLimit
 	watcher, err := d.lc.WatchIPNBus(ctx, mask)
 	if err != nil {
 		log.Printf("central: WatchIPNBus unavailable (%v); relying on periodic polling", err)
-		return
+		return false
 	}
 	defer watcher.Close()
+	if onConnect != nil {
+		onConnect()
+	}
 
 	for {
 		n, err := watcher.Next()
 		if err != nil {
 			if ctx.Err() != nil {
-				return // normal shutdown
+				return true // normal shutdown
 			}
 			log.Printf("central: WatchIPNBus error: %v", err)
-			return
+			return true
 		}
 		// NetMap is populated on initial connect and whenever peers change.
 		if n.NetMap != nil {

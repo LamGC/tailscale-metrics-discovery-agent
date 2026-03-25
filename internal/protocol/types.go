@@ -28,11 +28,23 @@ type ServiceEntry struct {
 	Target SDTarget    `json:"target"`
 }
 
+// TailscaleStatus summarizes the local Tailscale daemon state.
+type TailscaleStatus struct {
+	Connected    bool     `json:"connected"`
+	BackendState string   `json:"backend_state"`
+	Account      string   `json:"account,omitempty"`       // login name / email
+	Hostname     string   `json:"hostname,omitempty"`      // this node's hostname
+	TailscaleIPs []string `json:"tailscale_ips,omitempty"` // assigned Tailscale IPs
+	Tags         []string `json:"tags,omitempty"`          // ACL tags (tagged nodes)
+	Error        string   `json:"error,omitempty"`         // set when Tailscale is unreachable
+}
+
 // StatusResponse is the common management API status payload.
 type StatusResponse struct {
-	Running bool   `json:"running"`
-	Version string `json:"version,omitempty"`
-	Info    string `json:"info,omitempty"`
+	Running   bool             `json:"running"`
+	Version   string           `json:"version,omitempty"`
+	Info      string           `json:"info,omitempty"`
+	Tailscale *TailscaleStatus `json:"tailscale,omitempty"`
 }
 
 // PeerSource indicates how a peer was added to Central's peer set.

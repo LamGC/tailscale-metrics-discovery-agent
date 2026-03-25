@@ -7,9 +7,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
+
+	"tailscale.com/client/local"
 
 	"github.com/lamgc/tailscale-service-discovery-agent/internal/config"
 	"github.com/lamgc/tailscale-service-discovery-agent/internal/daemon"
+	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
 )
 
 // RunDaemon loads config from cfgFile and starts the Agent server.
@@ -29,18 +33,23 @@ func RunDaemon(cfgFile string) error {
 	srv.cfgFile = cfgFile
 
 	// Detect Tailscale IP for self-referential SDTargets (bucket/proxy endpoints).
+	_, listenPort, _ := splitHostPort(cfg.Server.Listen)
 	tsIP, err := detectSelfTailscaleIP()
 	if err != nil {
-		log.Printf("agent: could not detect Tailscale IP (%v); using listen addr for targets", err)
-	} else {
-		_, port, splitErr := splitHostPort(cfg.Server.Listen)
-		if splitErr == nil && port != "" {
-			srv.selfAddr = tsIP + ":" + port
-		}
+		log.Printf("agent: could not detect Tailscale IP (%v); will retry in background", err)
+	} else if listenPort != "" {
+		srv.selfAddr = tsIP + ":" + listenPort
+		log.Printf("agent: Tailscale IP detected, self address: %s", srv.selfAddr)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// If Tailscale was not available at startup, retry in background until we
+	// get an IP so bucket/proxy endpoints appear in the SD targets list.
+	if srv.selfAddr == "" && listenPort != "" {
+		go watchTailscaleConnect(ctx, srv, listenPort)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -66,15 +75,49 @@ func CLIStatus(socketPath string) error {
 		socketPath = daemon.DefaultAgentSocket()
 	}
 	c := daemon.NewClient(socketPath)
-	var st map[string]any
+	var st protocol.StatusResponse
 	if err := c.Get("/status", &st); err != nil {
 		return fmt.Errorf("could not reach agent daemon: %w", err)
 	}
-	fmt.Fprintf(os.Stdout, "Agent daemon is running.\n")
-	if info, ok := st["info"].(string); ok && info != "" {
-		fmt.Fprintf(os.Stdout, "Info: %s\n", info)
-	}
+	fmt.Fprintln(os.Stdout, "Agent daemon is running.")
+	printAgentTailscaleStatus(st.Tailscale)
 	return nil
+}
+
+// watchTailscaleConnect polls Tailscale every 10 seconds until an IP is
+// obtained, then updates srv.selfAddr and logs the connection.
+func watchTailscaleConnect(ctx context.Context, srv *Server, listenPort string) {
+	var lc local.Client
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+		}
+		st, err := lc.Status(ctx)
+		if err != nil {
+			continue
+		}
+		var tsIP string
+		for _, addr := range st.TailscaleIPs {
+			if addr.Is4() {
+				tsIP = addr.String()
+				break
+			}
+		}
+		if tsIP == "" && len(st.TailscaleIPs) > 0 {
+			tsIP = st.TailscaleIPs[0].String()
+		}
+		if tsIP == "" {
+			continue
+		}
+		newAddr := tsIP + ":" + listenPort
+		srv.mu.Lock()
+		srv.selfAddr = newAddr
+		srv.mu.Unlock()
+		log.Printf("agent: connected to Tailscale, self address: %s", newAddr)
+		return
+	}
 }
 
 // splitHostPort splits "host:port" or ":port".
