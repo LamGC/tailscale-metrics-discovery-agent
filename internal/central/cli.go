@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -47,16 +48,103 @@ func CLIDiscover(socketPath string, useColor string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "HOSTNAME\tTAILSCALE IP\tPORT\tSOURCE\tHEALTH\tTAGS")
+	fmt.Fprintln(tw, "HOSTNAME\tTAILSCALE IP\tPORT\tSOURCE\tHEALTH\tSERVICES\tTAGS")
 	for _, p := range resp.Peers {
 		port := portFromURL(p.AgentURL)
 		tags := strings.Join(p.Tags, ",")
 		health := colorHealth(p.Health)
 		source := colorSource(p.Source)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			p.Hostname, p.TailscaleIP, port, source, health, tags)
+		svcCol := formatServiceCount(p)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			p.Hostname, p.TailscaleIP, port, source, health, svcCol, tags)
 	}
 	return tw.Flush()
+}
+
+// CLIHealth queries Central for service health status across all Agent peers.
+func CLIHealth(socketPath, useColor string) error {
+	if socketPath == "" {
+		socketPath = daemon.DefaultCentralSocket()
+	}
+	applyColorFlag(useColor)
+
+	c := daemon.NewClient(socketPath)
+	type serviceHealth struct {
+		Name   string                        `json:"name"`
+		Type   protocol.ServiceType          `json:"type"`
+		Health *protocol.ServiceHealthStatus `json:"health"`
+	}
+	type peerHealth struct {
+		Hostname          string               `json:"hostname"`
+		TailscaleIP       string               `json:"tailscale_ip"`
+		AgentHealth       protocol.AgentHealth `json:"agent_health"`
+		Services          []serviceHealth      `json:"services"`
+		ServicesUpdatedAt *time.Time           `json:"services_updated_at,omitempty"`
+	}
+	var result []peerHealth
+	if err := c.Get("/mgmt/health", &result); err != nil {
+		return fmt.Errorf("could not reach central daemon: %w", err)
+	}
+	if len(result) == 0 {
+		fmt.Println("No service health data available.")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "HOSTNAME\tTAILSCALE IP\tSERVICE\tTYPE\tSTATUS\tCODE\tMESSAGE")
+	for _, p := range result {
+		// Build hostname prefix, append stale note when agent is unreachable.
+		hostPrefix := p.Hostname
+		var staleNote string
+		if p.AgentHealth != protocol.AgentHealthOK && p.ServicesUpdatedAt != nil {
+			age := time.Since(*p.ServicesUpdatedAt).Round(time.Minute)
+			staleNote = " " + color.YellowString("(stale %s ago)", formatDuration(age))
+		}
+		for _, svc := range p.Services {
+			status := "-"
+			code := "-"
+			msg := "-"
+			if h := svc.Health; h != nil {
+				switch h.Status {
+				case protocol.ServiceHealthHealthy:
+					status = color.GreenString(string(h.Status))
+				case protocol.ServiceHealthUnhealthy:
+					status = color.RedString(string(h.Status))
+				default:
+					status = color.YellowString(string(h.Status))
+				}
+				if h.StatusCode > 0 {
+					code = fmt.Sprintf("%d", h.StatusCode)
+				}
+				if h.Message != "" {
+					msg = h.Message
+				}
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				hostPrefix+staleNote, p.TailscaleIP, svc.Name, svc.Type, status, code, msg)
+			hostPrefix = "" // only print hostname on first row per peer
+			staleNote = ""
+		}
+	}
+	return tw.Flush()
+}
+
+// HealthCmd returns the "tsd central health" subcommand.
+func HealthCmd() *cobra.Command {
+	var (
+		socket   string
+		useColor string
+	)
+	cmd := &cobra.Command{
+		Use:   "health",
+		Short: "Show service health check status across all Agent peers",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return CLIHealth(socket, useColor)
+		},
+	}
+	cmd.Flags().StringVar(&socket, "socket", "", "Management socket path")
+	cmd.Flags().StringVar(&useColor, "color", "auto", "Color output: auto, true, false")
+	return cmd
 }
 
 // PeerCmd returns the "tsd central peer" subcommand.
@@ -228,6 +316,42 @@ func printTailscaleStatus(ts *protocol.TailscaleStatus) {
 	for _, tag := range ts.Tags {
 		fmt.Fprintf(os.Stdout, "  Tag:     %s\n", tag)
 	}
+}
+
+// formatServiceCount formats the Services count for the discover table.
+// If the data is stale (peer unreachable, showing cached data) it appends
+// a "(stale X ago)" annotation coloured yellow.
+func formatServiceCount(p protocol.PeerInfo) string {
+	if p.ServicesUpdatedAt == nil {
+		return "-"
+	}
+	count := fmt.Sprintf("%d", len(p.Services))
+	if p.Health != protocol.AgentHealthOK {
+		age := time.Since(*p.ServicesUpdatedAt).Round(time.Minute)
+		return count + " " + color.YellowString("(stale %s ago)", formatDuration(age))
+	}
+	return count
+}
+
+// formatDuration formats a duration as a human-friendly short string, e.g.
+// "5m", "2h30m", "1d4h".
+func formatDuration(d time.Duration) string {
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	mins := int(d.Minutes()) % 60
+	if days > 0 && hours > 0 {
+		return fmt.Sprintf("%dd%dh", days, hours)
+	}
+	if days > 0 {
+		return fmt.Sprintf("%dd", days)
+	}
+	if mins > 0 {
+		return fmt.Sprintf("%dh%dm", hours, mins)
+	}
+	return fmt.Sprintf("%dh", hours)
 }
 
 // portFromURL extracts the port from an "http://host:port" URL string.

@@ -32,6 +32,8 @@ type Server struct {
 	cfgFile        string
 	configServices map[string]struct{} // service names loaded from config file
 	reg            *registry
+	hc             *healthChecker
+	hcCancel       context.CancelFunc
 	buckets        *bucketStore
 	proxies        *proxyStore
 	mux            *http.ServeMux
@@ -52,6 +54,7 @@ func NewServer(cfg config.AgentConfig) *Server {
 		proxies:        newProxyStore(),
 		mux:            http.NewServeMux(),
 	}
+	s.hc = newHealthChecker(s.reg)
 	s.registerHandlers()
 	return s
 }
@@ -125,7 +128,7 @@ func (s *Server) reloadConfigServices(cfg config.AgentConfig) {
 	}
 
 	for _, st := range cfg.Statics {
-		if err := s.addStatic(st.Name, st.Targets, st.Labels); err != nil {
+		if err := s.addStatic(st.Name, st.Targets, st.Labels, st.Healthcheck); err != nil {
 			log.Printf("agent: reload static %q: %v", st.Name, err)
 			continue
 		}
@@ -134,7 +137,7 @@ func (s *Server) reloadConfigServices(cfg config.AgentConfig) {
 		s.mu.Unlock()
 	}
 	for _, bc := range cfg.Buckets {
-		if err := s.addBucket(bc.Name, bc.Labels); err != nil {
+		if err := s.addBucket(bc.Name, bc.Labels, bc.Healthcheck); err != nil {
 			log.Printf("agent: reload bucket %q: %v", bc.Name, err)
 			continue
 		}
@@ -149,7 +152,7 @@ func (s *Server) reloadConfigServices(cfg config.AgentConfig) {
 			username: pc.Auth.Username,
 			password: pc.Auth.Password,
 		}
-		if err := s.addProxy(pc.Name, pc.Target, auth, pc.Labels); err != nil {
+		if err := s.addProxy(pc.Name, pc.Target, auth, pc.Labels, pc.Healthcheck); err != nil {
 			log.Printf("agent: reload proxy %q: %v", pc.Name, err)
 			continue
 		}
@@ -162,6 +165,12 @@ func (s *Server) reloadConfigServices(cfg config.AgentConfig) {
 // Start loads static services from config, then starts the HTTP and
 // management servers.
 func (s *Server) Start() error {
+	hcCtx, hcCancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.hcCancel = hcCancel
+	s.mu.Unlock()
+	s.hc.Start(hcCtx)
+
 	if err := s.loadStaticServices(); err != nil {
 		return err
 	}
@@ -217,6 +226,11 @@ func (s *Server) Start() error {
 
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) {
+	s.mu.Lock()
+	if s.hcCancel != nil {
+		s.hcCancel()
+	}
+	s.mu.Unlock()
 	if s.httpSrv != nil {
 		_ = s.httpSrv.Shutdown(ctx)
 	}
@@ -231,18 +245,7 @@ func (s *Server) Shutdown(ctx context.Context) {
 // loadStaticServices registers static services from config and tracks them.
 func (s *Server) loadStaticServices() error {
 	for _, st := range s.cfg.Statics {
-		labels := map[string]string{}
-		maps.Copy(labels, st.Labels)
-		labels["__tsd_service_name"] = st.Name
-		entry := protocol.ServiceEntry{
-			Name: st.Name,
-			Type: protocol.ServiceTypeStatic,
-			Target: protocol.SDTarget{
-				Targets: st.Targets,
-				Labels:  labels,
-			},
-		}
-		if err := s.reg.add(entry); err != nil {
+		if err := s.addStatic(st.Name, st.Targets, st.Labels, st.Healthcheck); err != nil {
 			return fmt.Errorf("loading static service %q: %w", st.Name, err)
 		}
 		s.configServices[st.Name] = struct{}{}
@@ -253,7 +256,7 @@ func (s *Server) loadStaticServices() error {
 // loadBuckets creates bucket entries from config and tracks them.
 func (s *Server) loadBuckets() error {
 	for _, bc := range s.cfg.Buckets {
-		if err := s.addBucket(bc.Name, bc.Labels); err != nil {
+		if err := s.addBucket(bc.Name, bc.Labels, bc.Healthcheck); err != nil {
 			return err
 		}
 		s.configServices[bc.Name] = struct{}{}
@@ -270,7 +273,7 @@ func (s *Server) loadProxies() error {
 			username: pc.Auth.Username,
 			password: pc.Auth.Password,
 		}
-		if err := s.addProxy(pc.Name, pc.Target, auth, pc.Labels); err != nil {
+		if err := s.addProxy(pc.Name, pc.Target, auth, pc.Labels, pc.Healthcheck); err != nil {
 			return err
 		}
 		s.configServices[pc.Name] = struct{}{}
@@ -294,15 +297,20 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	targets := s.reg.sdTargets()
-	if targets == nil {
-		targets = []protocol.SDTarget{}
+	entries := s.reg.list()
+	if entries == nil {
+		entries = []protocol.ServiceEntry{}
 	}
-	if len(s.extraTargets) > 0 {
-		targets = append(targets, s.extraTargets...)
+	// Append self-metrics targets as static entries (no health check).
+	for _, t := range s.extraTargets {
+		entries = append(entries, protocol.ServiceEntry{
+			Name:   "tsd-agent-metrics",
+			Type:   protocol.ServiceTypeStatic,
+			Target: t,
+		})
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(targets); err != nil {
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
 		log.Printf("agent: failed to encode services: %v", err)
 	}
 }
@@ -447,7 +455,7 @@ func (s *Server) handleProxyMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 // addBucket creates a new push bucket and registers it in the service registry.
-func (s *Server) addBucket(name string, labels map[string]string) error {
+func (s *Server) addBucket(name string, labels map[string]string, hcCfg *config.HealthcheckConfig) error {
 	b := newBucket(name)
 	if err := s.buckets.add(name, b); err != nil {
 		return err
@@ -468,11 +476,13 @@ func (s *Server) addBucket(name string, labels map[string]string) error {
 		_ = s.buckets.remove(name)
 		return fmt.Errorf("registering bucket %q: %w", name, err)
 	}
+	s.hc.Register(name, hcCfg)
 	return nil
 }
 
 // removeBucket removes a bucket and its registry entry.
 func (s *Server) removeBucket(name string) error {
+	s.hc.Unregister(name)
 	if err := s.buckets.remove(name); err != nil {
 		return err
 	}
@@ -480,7 +490,7 @@ func (s *Server) removeBucket(name string) error {
 }
 
 // addProxy creates a proxy and registers it in the service registry.
-func (s *Server) addProxy(name, target string, auth proxyAuth, labels map[string]string) error {
+func (s *Server) addProxy(name, target string, auth proxyAuth, labels map[string]string, hcCfg *config.HealthcheckConfig) error {
 	p := newProxy(target, auth)
 	if err := s.proxies.add(name, p); err != nil {
 		return err
@@ -501,11 +511,13 @@ func (s *Server) addProxy(name, target string, auth proxyAuth, labels map[string
 		_ = s.proxies.remove(name)
 		return fmt.Errorf("registering proxy %q: %w", name, err)
 	}
+	s.hc.Register(name, hcCfg)
 	return nil
 }
 
 // removeProxy removes a proxy and its registry entry.
 func (s *Server) removeProxy(name string) error {
+	s.hc.Unregister(name)
 	if err := s.proxies.remove(name); err != nil {
 		return err
 	}
@@ -513,7 +525,7 @@ func (s *Server) removeProxy(name string) error {
 }
 
 // addStatic adds a static service entry.
-func (s *Server) addStatic(name string, targets []string, labels map[string]string) error {
+func (s *Server) addStatic(name string, targets []string, labels map[string]string, hcCfg *config.HealthcheckConfig) error {
 	lbs := map[string]string{}
 	maps.Copy(lbs, labels)
 	lbs["__tsd_service_name"] = name
@@ -525,10 +537,15 @@ func (s *Server) addStatic(name string, targets []string, labels map[string]stri
 			Labels:  lbs,
 		},
 	}
-	return s.reg.add(entry)
+	if err := s.reg.add(entry); err != nil {
+		return err
+	}
+	s.hc.Register(name, hcCfg)
+	return nil
 }
 
 // removeStatic removes a static service entry.
 func (s *Server) removeStatic(name string) error {
+	s.hc.Unregister(name)
 	return s.reg.remove(name)
 }

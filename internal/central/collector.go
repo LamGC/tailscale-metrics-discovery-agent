@@ -22,6 +22,17 @@ type manualPeer struct {
 	fromConfig bool // true when loaded from config file (not via CLI)
 }
 
+// serviceHistoryTTL is how long Central retains a peer's last-known Services
+// after it becomes unreachable.
+const serviceHistoryTTL = 72 * time.Hour
+
+// cachedPeerServices holds a snapshot of a peer's services from the last
+// successful query.
+type cachedPeerServices struct {
+	services   []protocol.ServiceEntry
+	fetchedAt  time.Time
+}
+
 // collector periodically queries each discovered Agent and aggregates the
 // Prometheus SDTargets into a single list.
 type collector struct {
@@ -34,16 +45,20 @@ type collector struct {
 	targets []protocol.SDTarget // aggregated from healthy peers only
 	tsDown  bool                // true when the last Discover() call failed
 
+	cacheMu      sync.RWMutex
+	serviceCache map[string]cachedPeerServices // keyed by TailscaleIP
+
 	manualMu    sync.RWMutex
 	manualPeers map[string]manualPeer // keyed by Tailscale IP / address
 }
 
 func newCollector(d *discoverer, agentToken string) *collector {
 	return &collector{
-		discoverer:  d,
-		agentToken:  agentToken,
-		httpClient:  &http.Client{Timeout: 10 * time.Second},
-		manualPeers: make(map[string]manualPeer),
+		discoverer:   d,
+		agentToken:   agentToken,
+		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		serviceCache: make(map[string]cachedPeerServices),
+		manualPeers:  make(map[string]manualPeer),
 	}
 }
 
@@ -173,9 +188,10 @@ func (c *collector) ListManualPeers() []manualPeer {
 
 // peerResult is the per-goroutine result from querying one Agent.
 type peerResult struct {
-	idx     int
-	targets []protocol.SDTarget
-	health  protocol.AgentHealth
+	idx      int
+	services []protocol.ServiceEntry
+	targets  []protocol.SDTarget
+	health   protocol.AgentHealth
 }
 
 // refresh re-discovers peers, applies manual overrides, queries each online
@@ -198,6 +214,21 @@ func (c *collector) refresh(ctx context.Context) {
 	}
 
 	peers := c.mergePeers(autoPeers)
+	now := time.Now()
+
+	// For offline peers (skipped below), restore cached services immediately.
+	c.cacheMu.RLock()
+	for i, peer := range peers {
+		if peer.Health != protocol.AgentHealthOffline {
+			continue
+		}
+		if cached, ok := c.serviceCache[peer.TailscaleIP]; ok && now.Sub(cached.fetchedAt) <= serviceHistoryTTL {
+			peers[i].Services = cached.services
+			t := cached.fetchedAt
+			peers[i].ServicesUpdatedAt = &t
+		}
+	}
+	c.cacheMu.RUnlock()
 
 	// Query each peer that Tailscale reports as online (or manually added).
 	resultCh := make(chan peerResult, len(peers))
@@ -210,24 +241,53 @@ func (c *collector) refresh(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			targets, health, qErr := c.queryAgent(ctx, peer)
+			services, targets, health, qErr := c.queryAgent(ctx, peer)
 			if qErr != nil {
 				log.Printf("central: agent %s (%s): %v", peer.Hostname, peer.TailscaleIP, qErr)
 			}
-			resultCh <- peerResult{idx: i, targets: targets, health: health}
+			resultCh <- peerResult{idx: i, services: services, targets: targets, health: health}
 		}()
 	}
 	wg.Wait()
 	close(resultCh)
 
-	// Apply results: update health and collect targets.
+	// Apply results: update health, services, and collect targets.
+	// On success update the service cache; on failure restore from cache if within TTL.
 	var allTargets []protocol.SDTarget
 	for r := range resultCh {
 		peers[r.idx].Health = r.health
+		ip := peers[r.idx].TailscaleIP
 		if r.health == protocol.AgentHealthOK {
+			// Freshen the cache.
+			c.cacheMu.Lock()
+			c.serviceCache[ip] = cachedPeerServices{services: r.services, fetchedAt: now}
+			c.cacheMu.Unlock()
+			t := now
+			peers[r.idx].Services = r.services
+			peers[r.idx].ServicesUpdatedAt = &t
 			allTargets = append(allTargets, r.targets...)
+		} else {
+			// Restore from cache if still within TTL.
+			c.cacheMu.RLock()
+			cached, ok := c.serviceCache[ip]
+			c.cacheMu.RUnlock()
+			if ok && now.Sub(cached.fetchedAt) <= serviceHistoryTTL {
+				peers[r.idx].Services = cached.services
+				peers[r.idx].ServicesUpdatedAt = &cached.fetchedAt
+			}
 		}
 	}
+
+	// Evict cache entries whose TTL has expired (peers not in current list keep
+	// the entry alive as long as they keep showing up; peers removed from
+	// Tailscale entirely will simply age out here).
+	c.cacheMu.Lock()
+	for ip, cached := range c.serviceCache {
+		if now.Sub(cached.fetchedAt) > serviceHistoryTTL {
+			delete(c.serviceCache, ip)
+		}
+	}
+	c.cacheMu.Unlock()
 	if allTargets == nil {
 		allTargets = []protocol.SDTarget{}
 	}
@@ -239,8 +299,8 @@ func (c *collector) refresh(ctx context.Context) {
 }
 
 // queryAgent fetches the service list from a single Agent.
-// Returns the SD targets, the resulting AgentHealth, and any error.
-func (c *collector) queryAgent(ctx context.Context, peer protocol.PeerInfo) ([]protocol.SDTarget, protocol.AgentHealth, error) {
+// Returns service entries, the extracted SD targets, the resulting AgentHealth, and any error.
+func (c *collector) queryAgent(ctx context.Context, peer protocol.PeerInfo) ([]protocol.ServiceEntry, []protocol.SDTarget, protocol.AgentHealth, error) {
 	c.mu.RLock()
 	token := c.agentToken
 	c.mu.RUnlock()
@@ -248,7 +308,7 @@ func (c *collector) queryAgent(ctx context.Context, peer protocol.PeerInfo) ([]p
 	url := peer.AgentURL + "/api/v1/services"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, protocol.AgentHealthTimeout, fmt.Errorf("build request: %w", err)
+		return nil, nil, protocol.AgentHealthTimeout, fmt.Errorf("build request: %w", err)
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -257,26 +317,30 @@ func (c *collector) queryAgent(ctx context.Context, peer protocol.PeerInfo) ([]p
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || isTimeoutError(err) {
-			return nil, protocol.AgentHealthTimeout, fmt.Errorf("timeout reaching agent: %w", err)
+			return nil, nil, protocol.AgentHealthTimeout, fmt.Errorf("timeout reaching agent: %w", err)
 		}
-		return nil, protocol.AgentHealthTimeout, fmt.Errorf("connect to agent: %w", err)
+		return nil, nil, protocol.AgentHealthTimeout, fmt.Errorf("connect to agent: %w", err)
 	}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return nil, protocol.AgentHealthUnauthorized, fmt.Errorf("agent returned HTTP %d (token mismatch?)", resp.StatusCode)
+		return nil, nil, protocol.AgentHealthUnauthorized, fmt.Errorf("agent returned HTTP %d (token mismatch?)", resp.StatusCode)
 	case http.StatusOK:
 		// fall through
 	default:
-		return nil, protocol.AgentHealthTimeout, fmt.Errorf("agent returned HTTP %d", resp.StatusCode)
+		return nil, nil, protocol.AgentHealthTimeout, fmt.Errorf("agent returned HTTP %d", resp.StatusCode)
 	}
 
-	var targets []protocol.SDTarget
-	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
-		return nil, protocol.AgentHealthTimeout, fmt.Errorf("decode agent response: %w", err)
+	var entries []protocol.ServiceEntry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return nil, nil, protocol.AgentHealthTimeout, fmt.Errorf("decode agent response: %w", err)
 	}
-	return targets, protocol.AgentHealthOK, nil
+	targets := make([]protocol.SDTarget, 0, len(entries))
+	for _, e := range entries {
+		targets = append(targets, e.Target)
+	}
+	return entries, targets, protocol.AgentHealthOK, nil
 }
 
 // mergePeers combines auto-discovered peers with manually configured peers.

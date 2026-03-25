@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
 )
@@ -27,6 +28,46 @@ func newCentralMgmtServer(s *Server) *http.Server {
 	// GET /targets — current aggregated SD targets
 	mux.HandleFunc("/targets", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, s.col.Targets())
+	})
+
+	// GET /mgmt/health — service health summary across all Agent peers
+	mux.HandleFunc("/mgmt/health", func(w http.ResponseWriter, r *http.Request) {
+		type serviceHealth struct {
+			Name   string                        `json:"name"`
+			Type   protocol.ServiceType          `json:"type"`
+			Health *protocol.ServiceHealthStatus `json:"health"`
+		}
+		type peerHealth struct {
+			Hostname          string               `json:"hostname"`
+			TailscaleIP       string               `json:"tailscale_ip"`
+			AgentHealth       protocol.AgentHealth `json:"agent_health"`
+			Services          []serviceHealth      `json:"services"`
+			ServicesUpdatedAt *time.Time           `json:"services_updated_at,omitempty"`
+		}
+		peers := s.col.Peers()
+		result := make([]peerHealth, 0, len(peers))
+		for _, p := range peers {
+			var svcs []serviceHealth
+			for _, svc := range p.Services {
+				if svc.Health != nil {
+					svcs = append(svcs, serviceHealth{
+						Name:   svc.Name,
+						Type:   svc.Type,
+						Health: svc.Health,
+					})
+				}
+			}
+			if len(svcs) > 0 {
+				result = append(result, peerHealth{
+					Hostname:          p.Hostname,
+					TailscaleIP:       p.TailscaleIP,
+					AgentHealth:       p.Health,
+					Services:          svcs,
+					ServicesUpdatedAt: p.ServicesUpdatedAt,
+				})
+			}
+		}
+		writeJSON(w, result)
 	})
 
 	// POST /reload — reload config file and trigger an immediate refresh

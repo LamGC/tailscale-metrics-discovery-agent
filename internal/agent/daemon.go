@@ -59,7 +59,7 @@ func RunDaemon(cfgFile string) error {
 	select {
 	case <-ctx.Done():
 		log.Println("agent: shutting down...")
-		shutCtx, cancel := context.WithTimeout(context.Background(), 0)
+		shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		srv.Shutdown(shutCtx)
 		daemon.Cleanup(cfg.Management.Socket)

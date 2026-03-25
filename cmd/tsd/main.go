@@ -68,6 +68,7 @@ func centralCmd() *cobra.Command {
 
 	cmd.AddCommand(daemonCmd, statusCmd, discoverCmd)
 	cmd.AddCommand(central.PeerCmd())
+	cmd.AddCommand(central.HealthCmd())
 	return cmd
 }
 

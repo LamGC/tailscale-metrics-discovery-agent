@@ -25,9 +25,10 @@ func ServiceCmd() *cobra.Command {
 
 func serviceAddCmd() *cobra.Command {
 	var (
-		socket  string
-		targets []string
-		labels  []string
+		socket         string
+		targets        []string
+		labels         []string
+		healthcheckURL string
 	)
 	cmd := &cobra.Command{
 		Use:   "add <name>",
@@ -40,15 +41,17 @@ func serviceAddCmd() *cobra.Command {
 			}
 			c := daemon.NewClient(resolveSocket(socket))
 			return c.Post("/mgmt/service/add", map[string]any{
-				"name":    args[0],
-				"targets": targets,
-				"labels":  lbs,
+				"name":            args[0],
+				"targets":         targets,
+				"labels":          lbs,
+				"healthcheck_url": healthcheckURL,
 			}, nil)
 		},
 	}
 	cmd.Flags().StringVar(&socket, "socket", "", "Management socket path")
 	cmd.Flags().StringArrayVarP(&targets, "target", "t", nil, "Target address(es), e.g. host:9100 (repeatable)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "Label in key=value format (repeatable)")
+	cmd.Flags().StringVar(&healthcheckURL, "healthcheck-url", "", "URL to GET periodically; 2xx = healthy")
 	_ = cmd.MarkFlagRequired("target")
 	return cmd
 }
@@ -93,8 +96,9 @@ func BucketCmd() *cobra.Command {
 
 func bucketAddCmd() *cobra.Command {
 	var (
-		socket string
-		labels []string
+		socket         string
+		labels         []string
+		healthcheckURL string
 	)
 	cmd := &cobra.Command{
 		Use:   "add <name>",
@@ -107,13 +111,15 @@ func bucketAddCmd() *cobra.Command {
 			}
 			c := daemon.NewClient(resolveSocket(socket))
 			return c.Post("/mgmt/bucket/add", map[string]any{
-				"name":   args[0],
-				"labels": lbs,
+				"name":            args[0],
+				"labels":          lbs,
+				"healthcheck_url": healthcheckURL,
 			}, nil)
 		},
 	}
 	cmd.Flags().StringVar(&socket, "socket", "", "Management socket path")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "Label in key=value format (repeatable)")
+	cmd.Flags().StringVar(&healthcheckURL, "healthcheck-url", "", "URL to GET periodically; 2xx = healthy")
 	return cmd
 }
 
@@ -172,13 +178,14 @@ func ProxyCmd() *cobra.Command {
 
 func proxyAddCmd() *cobra.Command {
 	var (
-		socket   string
-		target   string
-		authType string
-		token    string
-		username string
-		password string
-		labels   []string
+		socket         string
+		target         string
+		authType       string
+		token          string
+		username       string
+		password       string
+		labels         []string
+		healthcheckURL string
 	)
 	cmd := &cobra.Command{
 		Use:   "add <name>",
@@ -191,13 +198,14 @@ func proxyAddCmd() *cobra.Command {
 			}
 			c := daemon.NewClient(resolveSocket(socket))
 			return c.Post("/mgmt/proxy/add", map[string]any{
-				"name":      args[0],
-				"target":    target,
-				"auth_type": authType,
-				"token":     token,
-				"username":  username,
-				"password":  password,
-				"labels":    lbs,
+				"name":            args[0],
+				"target":          target,
+				"auth_type":       authType,
+				"token":           token,
+				"username":        username,
+				"password":        password,
+				"labels":          lbs,
+				"healthcheck_url": healthcheckURL,
 			}, nil)
 		},
 	}
@@ -208,6 +216,7 @@ func proxyAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&username, "username", "", "Username (for --auth-type basic)")
 	cmd.Flags().StringVar(&password, "password", "", "Password (for --auth-type basic)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "Label in key=value format (repeatable)")
+	cmd.Flags().StringVar(&healthcheckURL, "healthcheck-url", "", "URL to GET periodically; 2xx = healthy")
 	_ = cmd.MarkFlagRequired("target")
 	return cmd
 }
@@ -304,9 +313,35 @@ func listServices(socketPath string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tTYPE\tTARGETS")
+	fmt.Fprintln(tw, "NAME\tTYPE\tHEALTH\tTARGETS")
 	for _, e := range entries {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", e.Name, e.Type, strings.Join(e.Target.Targets, ", "))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+			e.Name, e.Type, colorServiceHealth(e.Health),
+			strings.Join(e.Target.Targets, ", "))
 	}
 	return tw.Flush()
+}
+
+// colorServiceHealth returns a coloured health status string.
+func colorServiceHealth(h *protocol.ServiceHealthStatus) string {
+	if h == nil {
+		return "-"
+	}
+	switch h.Status {
+	case protocol.ServiceHealthHealthy:
+		if h.StatusCode > 0 {
+			return color.GreenString("healthy (%d)", h.StatusCode)
+		}
+		return color.GreenString("healthy")
+	case protocol.ServiceHealthUnhealthy:
+		if h.StatusCode > 0 {
+			return color.RedString("unhealthy (%d)", h.StatusCode)
+		}
+		if h.Message != "" {
+			return color.RedString("unhealthy: %s", h.Message)
+		}
+		return color.RedString("unhealthy")
+	default:
+		return color.YellowString("unknown")
+	}
 }

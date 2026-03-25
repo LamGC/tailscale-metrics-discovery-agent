@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
@@ -58,15 +59,25 @@ func (r *registry) list() []protocol.ServiceEntry {
 	for _, e := range r.entries {
 		out = append(out, *e)
 	}
+	slices.SortFunc(out, func(a, b protocol.ServiceEntry) int {
+		if a.Name < b.Name {
+			return -1
+		}
+		if a.Name > b.Name {
+			return 1
+		}
+		return 0
+	})
 	return out
 }
 
-// sdTargets converts all registry entries to Prometheus SDTarget slice.
-func (r *registry) sdTargets() []protocol.SDTarget {
-	entries := r.list()
-	out := make([]protocol.SDTarget, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, e.Target)
+// updateHealth updates the Health field of a registry entry in-place.
+// Does nothing if name is not found.
+func (r *registry) updateHealth(name string, h protocol.ServiceHealthStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.entries[name]; ok {
+		e.Health = &h
 	}
-	return out
 }
+

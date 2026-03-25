@@ -1,5 +1,7 @@
 package protocol
 
+import "time"
+
 // DefaultAgentPort is the well-known port that Agent listens on by default.
 // Both Central (for auto-discovery) and Agent (for auto-binding) use this
 // constant so the two sides agree without explicit configuration.
@@ -21,11 +23,30 @@ const (
 	ServiceTypeProxy  ServiceType = "proxy"
 )
 
+// ServiceHealth is the health status of a service's health check.
+type ServiceHealth string
+
+const (
+	ServiceHealthUnknown   ServiceHealth = "unknown"   // check configured, not yet run
+	ServiceHealthHealthy   ServiceHealth = "healthy"
+	ServiceHealthUnhealthy ServiceHealth = "unhealthy"
+)
+
+// ServiceHealthStatus is the current result of a service health check.
+type ServiceHealthStatus struct {
+	Status     ServiceHealth `json:"status"`
+	CheckURL   string        `json:"check_url"`
+	LastCheck  *time.Time    `json:"last_check,omitempty"` // nil until first check completes
+	StatusCode int           `json:"status_code,omitempty"`
+	Message    string        `json:"message,omitempty"` // error message or HTTP status reason
+}
+
 // ServiceEntry is an entry in the Agent's service registry.
 type ServiceEntry struct {
-	Name   string      `json:"name"`
-	Type   ServiceType `json:"type"`
-	Target SDTarget    `json:"target"`
+	Name   string               `json:"name"`
+	Type   ServiceType          `json:"type"`
+	Target SDTarget             `json:"target"`
+	Health *ServiceHealthStatus `json:"health,omitempty"` // nil if no healthcheck configured
 }
 
 // TailscaleStatus summarizes the local Tailscale daemon state.
@@ -76,12 +97,14 @@ const (
 
 // PeerInfo describes a peer running an Agent.
 type PeerInfo struct {
-	Hostname    string      `json:"hostname"`
-	TailscaleIP string      `json:"tailscale_ip"`
-	Tags        []string    `json:"tags"`
-	AgentURL    string      `json:"agent_url"`
-	Source      PeerSource  `json:"source"`
-	Health      AgentHealth `json:"health"`
+	Hostname          string         `json:"hostname"`
+	TailscaleIP       string         `json:"tailscale_ip"`
+	Tags              []string       `json:"tags"`
+	AgentURL          string         `json:"agent_url"`
+	Source            PeerSource     `json:"source"`
+	Health            AgentHealth    `json:"health"`
+	Services          []ServiceEntry `json:"services,omitempty"`           // from last successful query
+	ServicesUpdatedAt *time.Time     `json:"services_updated_at,omitempty"` // when Services was last fetched
 }
 
 // PeersResponse is returned by Central's /peers management endpoint.

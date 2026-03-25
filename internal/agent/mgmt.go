@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/lamgc/tailscale-service-discovery-agent/internal/config"
 	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
 )
 
@@ -45,15 +46,20 @@ func newMgmtServer(s *Server) *http.Server {
 			return
 		}
 		var req struct {
-			Name    string            `json:"name"`
-			Targets []string          `json:"targets"`
-			Labels  map[string]string `json:"labels"`
+			Name           string            `json:"name"`
+			Targets        []string          `json:"targets"`
+			Labels         map[string]string `json:"labels"`
+			HealthcheckURL string            `json:"healthcheck_url"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := s.addStatic(req.Name, req.Targets, req.Labels); err != nil {
+		var hcCfg *config.HealthcheckConfig
+		if req.HealthcheckURL != "" {
+			hcCfg = &config.HealthcheckConfig{URL: req.HealthcheckURL}
+		}
+		if err := s.addStatic(req.Name, req.Targets, req.Labels, hcCfg); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
@@ -87,14 +93,19 @@ func newMgmtServer(s *Server) *http.Server {
 			return
 		}
 		var req struct {
-			Name   string            `json:"name"`
-			Labels map[string]string `json:"labels"`
+			Name           string            `json:"name"`
+			Labels         map[string]string `json:"labels"`
+			HealthcheckURL string            `json:"healthcheck_url"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := s.addBucket(req.Name, req.Labels); err != nil {
+		var hcCfg *config.HealthcheckConfig
+		if req.HealthcheckURL != "" {
+			hcCfg = &config.HealthcheckConfig{URL: req.HealthcheckURL}
+		}
+		if err := s.addBucket(req.Name, req.Labels, hcCfg); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
@@ -150,13 +161,14 @@ func newMgmtServer(s *Server) *http.Server {
 			return
 		}
 		var req struct {
-			Name     string            `json:"name"`
-			Target   string            `json:"target"`
-			AuthType string            `json:"auth_type"`
-			Token    string            `json:"token"`
-			Username string            `json:"username"`
-			Password string            `json:"password"`
-			Labels   map[string]string `json:"labels"`
+			Name           string            `json:"name"`
+			Target         string            `json:"target"`
+			AuthType       string            `json:"auth_type"`
+			Token          string            `json:"token"`
+			Username       string            `json:"username"`
+			Password       string            `json:"password"`
+			Labels         map[string]string `json:"labels"`
+			HealthcheckURL string            `json:"healthcheck_url"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -168,7 +180,11 @@ func newMgmtServer(s *Server) *http.Server {
 			username: req.Username,
 			password: req.Password,
 		}
-		if err := s.addProxy(req.Name, req.Target, auth, req.Labels); err != nil {
+		var hcCfg *config.HealthcheckConfig
+		if req.HealthcheckURL != "" {
+			hcCfg = &config.HealthcheckConfig{URL: req.HealthcheckURL}
+		}
+		if err := s.addProxy(req.Name, req.Target, auth, req.Labels, hcCfg); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}

@@ -31,28 +31,38 @@ type AgentManagement struct {
 	Socket string `toml:"socket"`
 }
 
+// HealthcheckConfig configures an optional HTTP health check for a service.
+type HealthcheckConfig struct {
+	URL      string   `toml:"url"`
+	Interval Duration `toml:"interval"` // default: 30s if zero
+	Timeout  Duration `toml:"timeout"`  // default: 5s if zero
+}
+
 // StaticService is a pre-configured Prometheus target exposed as-is.
 type StaticService struct {
-	Name    string            `toml:"name"`
-	Targets []string          `toml:"targets"`
-	Labels  map[string]string `toml:"labels"`
+	Name        string             `toml:"name"`
+	Targets     []string           `toml:"targets"`
+	Labels      map[string]string  `toml:"labels"`
+	Healthcheck *HealthcheckConfig `toml:"healthcheck"`
 }
 
 // BucketService is a named Pushgateway-like container. Each bucket gets its
 // own /bucket/<name>/metrics scrape endpoint and is auto-registered as a
 // separate SDTarget pointing to the Agent itself.
 type BucketService struct {
-	Name   string            `toml:"name"`
-	Labels map[string]string `toml:"labels"`
+	Name        string             `toml:"name"`
+	Labels      map[string]string  `toml:"labels"`
+	Healthcheck *HealthcheckConfig `toml:"healthcheck"`
 }
 
 // ProxyService is a virtual endpoint: Agent proxies scrape requests to a
 // local target, optionally injecting authentication.
 type ProxyService struct {
-	Name   string            `toml:"name"`
-	Target string            `toml:"target"`
-	Auth   ProxyAuth         `toml:"auth"`
-	Labels map[string]string `toml:"labels"`
+	Name        string             `toml:"name"`
+	Target      string             `toml:"target"`
+	Auth        ProxyAuth          `toml:"auth"`
+	Labels      map[string]string  `toml:"labels"`
+	Healthcheck *HealthcheckConfig `toml:"healthcheck"`
 }
 
 // ProxyAuth holds authentication credentials for a proxy target.
