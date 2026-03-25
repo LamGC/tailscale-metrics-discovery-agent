@@ -18,8 +18,8 @@ const (
 // socketPath should be in the form \\.\pipe\<name>.
 func Listen(socketPath string) (net.Listener, error) {
 	ln, err := winio.ListenPipe(socketPath, &winio.PipeConfig{
-		// Allow only the current user and admins.
-		SecurityDescriptor: "D:P(A;;GA;;;OW)(A;;GA;;;BA)",
+		// Allow SYSTEM, Administrators, and the pipe owner.
+		SecurityDescriptor: "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)",
 		InputBufferSize:    65536,
 		OutputBufferSize:   65536,
 	})

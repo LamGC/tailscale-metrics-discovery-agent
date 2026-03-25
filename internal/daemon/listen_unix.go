@@ -6,13 +6,27 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 
 	"github.com/lamgc/tailscale-service-discovery-agent/internal/config"
 )
 
-// Listen creates a listener on the given socket path.duiyu
-// On Unix-like systems this is a Unix domain socket.
+// Listen creates a Unix domain socket listener at socketPath.
+//
+// Directory permissions:
+//   - root (uid 0): 0o755 — consistent with /var/run conventions
+//   - normal user:  0o700 — private to the owning user
+//
+// The socket file itself is always restricted to 0o600 (owner r/w only)
+// so no other user can connect even if they discover the path.
 func Listen(socketPath string) (net.Listener, error) {
+	dirMode := os.FileMode(0o700)
+	if os.Getuid() == 0 {
+		dirMode = 0o755
+	}
+	if err := os.MkdirAll(filepath.Dir(socketPath), dirMode); err != nil {
+		return nil, fmt.Errorf("creating socket dir %s: %w", filepath.Dir(socketPath), err)
+	}
 	// Remove stale socket file.
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("removing stale socket %s: %w", socketPath, err)
@@ -21,8 +35,8 @@ func Listen(socketPath string) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listening on unix socket %s: %w", socketPath, err)
 	}
-	// Restrict permissions: only owner can connect.
-	if err := os.Chmod(socketPath, 0600); err != nil {
+	// Restrict to owner only — no other user may connect.
+	if err := os.Chmod(socketPath, 0o600); err != nil {
 		_ = ln.Close()
 		return nil, fmt.Errorf("chmod socket: %w", err)
 	}
