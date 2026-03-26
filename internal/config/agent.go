@@ -113,12 +113,8 @@ func LoadAgentConfig(path string) (AgentConfig, error) {
 	return cfg, nil
 }
 
-// SaveAgentConfig writes cfg to path in TOML format.
+// SaveAgentConfig writes cfg to path in TOML format atomically
+// (write to a temp file then rename).
 func SaveAgentConfig(path string, cfg AgentConfig) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("creating agent config file: %w", err)
-	}
-	defer f.Close()
-	return toml.NewEncoder(f).Encode(cfg)
+	return atomicWriteTOML(path, cfg)
 }

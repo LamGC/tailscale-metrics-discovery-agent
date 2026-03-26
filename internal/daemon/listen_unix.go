@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/config"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
 )
 
 // Listen creates a Unix domain socket listener at socketPath.

@@ -15,9 +15,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/config"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/daemon"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/daemon"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
 )
 
 // Server is the Agent HTTP server. It serves:
@@ -27,32 +27,30 @@ import (
 //   - GET  /bucket/<name>/metrics    — expose bucket metrics
 //   - GET  /proxy/<name>/metrics     — proxy-scrape local target
 type Server struct {
-	mu             sync.RWMutex
-	cfg            config.AgentConfig
-	cfgFile        string
-	configServices map[string]struct{} // service names loaded from config file
-	reg            *registry
-	hc             *healthChecker
-	hcCancel       context.CancelFunc
-	buckets        *bucketStore
-	proxies        *proxyStore
-	mux            *http.ServeMux
-	httpSrv        *http.Server
-	mgmtSrv        *http.Server
-	metricsSrv     *http.Server        // optional dedicated metrics listener
-	selfAddr       string              // host:port announced in SDTargets for dynamic services
-	extraTargets   []protocol.SDTarget // appended to /api/v1/services when register_self=true
+	mu           sync.RWMutex
+	cfg          config.AgentConfig
+	cfgFile      string
+	reg          *registry
+	hc           *healthChecker
+	hcCancel     context.CancelFunc
+	buckets      *bucketStore
+	proxies      *proxyStore
+	mux          *http.ServeMux
+	httpSrv      *http.Server
+	mgmtSrv      *http.Server
+	metricsSrv   *http.Server        // optional dedicated metrics listener
+	selfAddr     string              // host:port announced in SDTargets for dynamic services
+	extraTargets []protocol.SDTarget // appended to /api/v1/services when register_self=true
 }
 
 // NewServer creates a new Agent Server from the given config.
 func NewServer(cfg config.AgentConfig) *Server {
 	s := &Server{
-		cfg:            cfg,
-		configServices: make(map[string]struct{}),
-		reg:            newRegistry(),
-		buckets:        newBucketStore(),
-		proxies:        newProxyStore(),
-		mux:            http.NewServeMux(),
+		cfg:     cfg,
+		reg:     newRegistry(),
+		buckets: newBucketStore(),
+		proxies: newProxyStore(),
+		mux:     http.NewServeMux(),
 	}
 	s.hc = newHealthChecker(s.reg)
 	s.registerHandlers()
@@ -98,7 +96,7 @@ func (s *Server) Reload() error {
 		return fmt.Errorf("reload agent config: %w", err)
 	}
 	s.mu.Lock()
-	s.cfg.Server.Token = cfg.Server.Token
+	s.cfg = cfg
 	s.mu.Unlock()
 
 	s.reloadConfigServices(cfg)
@@ -106,44 +104,28 @@ func (s *Server) Reload() error {
 	return nil
 }
 
-// reloadConfigServices removes config-origin services and re-adds them from cfg.
-// CLI-added services (not in configServices) are untouched.
+// reloadConfigServices removes all registered services and re-adds them from cfg.
+// Since CLI adds are persisted to the config file, cfg is the single source of truth.
 func (s *Server) reloadConfigServices(cfg config.AgentConfig) {
-	s.mu.Lock()
-	old := s.configServices
-	s.configServices = make(map[string]struct{})
-	s.mu.Unlock()
-
-	for name := range old {
-		if e, ok := s.reg.get(name); ok {
-			switch e.Type {
-			case protocol.ServiceTypeStatic:
-				_ = s.removeStatic(name)
-			case protocol.ServiceTypeBucket:
-				_ = s.removeBucket(name)
-			case protocol.ServiceTypeProxy:
-				_ = s.removeProxy(name)
-			}
+	for _, e := range s.reg.list() {
+		switch e.Type {
+		case protocol.ServiceTypeStatic:
+			_ = s.removeStatic(e.Name)
+		case protocol.ServiceTypeBucket:
+			_ = s.removeBucket(e.Name)
+		case protocol.ServiceTypeProxy:
+			_ = s.removeProxy(e.Name)
 		}
 	}
-
 	for _, st := range cfg.Statics {
 		if err := s.addStatic(st.Name, st.Targets, st.Labels, st.Healthcheck); err != nil {
 			log.Printf("agent: reload static %q: %v", st.Name, err)
-			continue
 		}
-		s.mu.Lock()
-		s.configServices[st.Name] = struct{}{}
-		s.mu.Unlock()
 	}
 	for _, bc := range cfg.Buckets {
 		if err := s.addBucket(bc.Name, bc.Labels, bc.Healthcheck); err != nil {
 			log.Printf("agent: reload bucket %q: %v", bc.Name, err)
-			continue
 		}
-		s.mu.Lock()
-		s.configServices[bc.Name] = struct{}{}
-		s.mu.Unlock()
 	}
 	for _, pc := range cfg.Proxies {
 		auth := proxyAuth{
@@ -154,11 +136,7 @@ func (s *Server) reloadConfigServices(cfg config.AgentConfig) {
 		}
 		if err := s.addProxy(pc.Name, pc.Target, auth, pc.Labels, pc.Healthcheck); err != nil {
 			log.Printf("agent: reload proxy %q: %v", pc.Name, err)
-			continue
 		}
-		s.mu.Lock()
-		s.configServices[pc.Name] = struct{}{}
-		s.mu.Unlock()
 	}
 }
 
@@ -242,29 +220,27 @@ func (s *Server) Shutdown(ctx context.Context) {
 	}
 }
 
-// loadStaticServices registers static services from config and tracks them.
+// loadStaticServices registers static services from config.
 func (s *Server) loadStaticServices() error {
 	for _, st := range s.cfg.Statics {
 		if err := s.addStatic(st.Name, st.Targets, st.Labels, st.Healthcheck); err != nil {
 			return fmt.Errorf("loading static service %q: %w", st.Name, err)
 		}
-		s.configServices[st.Name] = struct{}{}
 	}
 	return nil
 }
 
-// loadBuckets creates bucket entries from config and tracks them.
+// loadBuckets creates bucket entries from config.
 func (s *Server) loadBuckets() error {
 	for _, bc := range s.cfg.Buckets {
 		if err := s.addBucket(bc.Name, bc.Labels, bc.Healthcheck); err != nil {
 			return err
 		}
-		s.configServices[bc.Name] = struct{}{}
 	}
 	return nil
 }
 
-// loadProxies creates proxy entries from config and tracks them.
+// loadProxies creates proxy entries from config.
 func (s *Server) loadProxies() error {
 	for _, pc := range s.cfg.Proxies {
 		auth := proxyAuth{
@@ -276,7 +252,6 @@ func (s *Server) loadProxies() error {
 		if err := s.addProxy(pc.Name, pc.Target, auth, pc.Labels, pc.Healthcheck); err != nil {
 			return err
 		}
-		s.configServices[pc.Name] = struct{}{}
 	}
 	return nil
 }
@@ -542,6 +517,28 @@ func (s *Server) addStatic(name string, targets []string, labels map[string]stri
 	}
 	s.hc.Register(name, hcCfg)
 	return nil
+}
+
+// saveConfig persists cfg to the configured config file.
+// Errors are logged but not returned — a failed save should not break the operation.
+func (s *Server) saveConfig(cfg config.AgentConfig) {
+	if s.cfgFile == "" {
+		return
+	}
+	if err := config.SaveAgentConfig(s.cfgFile, cfg); err != nil {
+		log.Printf("agent: failed to save config: %v", err)
+	}
+}
+
+// filterSlice returns a new slice containing only elements for which keep returns true.
+func filterSlice[T any](s []T, keep func(T) bool) []T {
+	out := make([]T, 0, len(s))
+	for _, v := range s {
+		if keep(v) {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // removeStatic removes a static service entry.

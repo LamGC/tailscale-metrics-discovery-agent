@@ -5,7 +5,7 @@ import (
 
 	"tailscale.com/client/local"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
 )
 
 // QueryStatus returns the Tailscale daemon state by querying the local API.

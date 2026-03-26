@@ -10,8 +10,8 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/daemon"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/daemon"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
 )
 
 // CLIStatus queries the running Central daemon for its status.
@@ -254,7 +254,7 @@ func applyColorFlag(val string) {
 		color.NoColor = true
 	case "true", "yes", "1":
 		color.NoColor = false
-	// "auto" (default): fatih/color detects TTY automatically; nothing to do.
+		// "auto" (default): fatih/color detects TTY automatically; nothing to do.
 	}
 }
 

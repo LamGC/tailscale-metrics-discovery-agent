@@ -1,4 +1,4 @@
-module github.com/lamgc/tailscale-service-discovery-agent
+module github.com/LamGC/tailscale-metrics-discovery-agent
 
 go 1.26.1
 

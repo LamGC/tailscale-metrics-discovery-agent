@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/config"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
 )
 
 // manualPeer is a peer configured explicitly by the operator.
@@ -29,8 +30,19 @@ const serviceHistoryTTL = 72 * time.Hour
 // cachedPeerServices holds a snapshot of a peer's services from the last
 // successful query.
 type cachedPeerServices struct {
-	services   []protocol.ServiceEntry
-	fetchedAt  time.Time
+	services  []protocol.ServiceEntry
+	fetchedAt time.Time
+}
+
+// peerCacheEntry is the on-disk representation of one peer's cached data.
+type peerCacheEntry struct {
+	TailscaleIP string                  `json:"tailscale_ip"`
+	Hostname    string                  `json:"hostname"`
+	Tags        []string                `json:"tags"`
+	AgentURL    string                  `json:"agent_url"`
+	Source      protocol.PeerSource     `json:"source"`
+	Services    []protocol.ServiceEntry `json:"services"`
+	FetchedAt   time.Time               `json:"fetched_at"`
 }
 
 // collector periodically queries each discovered Agent and aggregates the
@@ -39,6 +51,7 @@ type collector struct {
 	discoverer *discoverer
 	agentToken string
 	httpClient *http.Client
+	peersFile  string // path to the peer history cache JSON file; "" = disabled
 
 	mu      sync.RWMutex
 	peers   []protocol.PeerInfo // full peer list with health status
@@ -50,6 +63,8 @@ type collector struct {
 
 	manualMu    sync.RWMutex
 	manualPeers map[string]manualPeer // keyed by Tailscale IP / address
+
+	saveMu sync.Mutex // serialises concurrent savePeerCache() calls
 }
 
 func newCollector(d *discoverer, agentToken string) *collector {
@@ -59,6 +74,87 @@ func newCollector(d *discoverer, agentToken string) *collector {
 		httpClient:   &http.Client{Timeout: 10 * time.Second},
 		serviceCache: make(map[string]cachedPeerServices),
 		manualPeers:  make(map[string]manualPeer),
+	}
+}
+
+// savePeerCache writes the current service cache to peersFile as JSON.
+// It is a best-effort operation; errors are logged but not returned.
+func (c *collector) savePeerCache() {
+	if c.peersFile == "" {
+		return
+	}
+	c.cacheMu.RLock()
+	entries := make([]peerCacheEntry, 0, len(c.serviceCache))
+	for ip, cached := range c.serviceCache {
+		// Include basic peer info if available from the current peers list.
+		var hostname string
+		var tags []string
+		var agentURL string
+		var source protocol.PeerSource
+		c.mu.RLock()
+		for _, p := range c.peers {
+			if p.TailscaleIP == ip {
+				hostname = p.Hostname
+				tags = p.Tags
+				agentURL = p.AgentURL
+				source = p.Source
+				break
+			}
+		}
+		c.mu.RUnlock()
+		entries = append(entries, peerCacheEntry{
+			TailscaleIP: ip,
+			Hostname:    hostname,
+			Tags:        tags,
+			AgentURL:    agentURL,
+			Source:      source,
+			Services:    cached.services,
+			FetchedAt:   cached.fetchedAt,
+		})
+	}
+	c.cacheMu.RUnlock()
+
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
+	if err := config.AtomicWriteJSON(c.peersFile, entries); err != nil {
+		log.Printf("central: failed to save peer cache: %v", err)
+	}
+}
+
+// loadPeerCache reads the peer history cache from peersFile and pre-populates
+// serviceCache with entries that are still within the TTL.
+func (c *collector) loadPeerCache() {
+	if c.peersFile == "" {
+		return
+	}
+	data, err := os.ReadFile(c.peersFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("central: reading peer cache: %v", err)
+		}
+		return
+	}
+	var entries []peerCacheEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		log.Printf("central: parsing peer cache: %v", err)
+		return
+	}
+	now := time.Now()
+	loaded := 0
+	c.cacheMu.Lock()
+	for _, e := range entries {
+		if now.Sub(e.FetchedAt) > serviceHistoryTTL {
+			continue // expired
+		}
+		c.serviceCache[e.TailscaleIP] = cachedPeerServices{
+			services:  e.Services,
+			fetchedAt: e.FetchedAt,
+		}
+		loaded++
+	}
+	c.cacheMu.Unlock()
+	if loaded > 0 {
+		log.Printf("central: loaded %d peer(s) from cache (%s)", loaded, c.peersFile)
 	}
 }
 
@@ -296,6 +392,9 @@ func (c *collector) refresh(ctx context.Context) {
 	c.peers = peers
 	c.targets = allTargets
 	c.mu.Unlock()
+
+	// Persist the updated service cache to disk for fast startup next time.
+	go c.savePeerCache()
 }
 
 // queryAgent fetches the service list from a single Agent.

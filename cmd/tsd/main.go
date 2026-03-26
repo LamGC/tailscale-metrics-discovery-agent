@@ -6,9 +6,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/agent"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/central"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/config"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/agent"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/central"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
 )
 
 func main() {

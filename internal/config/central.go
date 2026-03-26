@@ -100,6 +100,11 @@ func DefaultCentralConfig() CentralConfig {
 	}
 }
 
+// SaveCentralConfig writes cfg to path in TOML format atomically.
+func SaveCentralConfig(path string, cfg CentralConfig) error {
+	return atomicWriteTOML(path, cfg)
+}
+
 // LoadCentralConfig reads and parses a TOML config file.
 // If path is empty, defaults are returned.
 // If the file does not exist, it is created with defaults and defaults are returned.

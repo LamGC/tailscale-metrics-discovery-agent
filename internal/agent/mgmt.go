@@ -5,8 +5,8 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/config"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
 )
 
 // newMgmtServer returns an *http.Server that handles management API calls for
@@ -63,6 +63,16 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
+		s.mu.Lock()
+		s.cfg.Statics = append(s.cfg.Statics, config.StaticService{
+			Name:        req.Name,
+			Targets:     req.Targets,
+			Labels:      req.Labels,
+			Healthcheck: hcCfg,
+		})
+		cfg := s.cfg
+		s.mu.Unlock()
+		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -83,6 +93,11 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
+		s.mu.Lock()
+		s.cfg.Statics = filterSlice(s.cfg.Statics, func(v config.StaticService) bool { return v.Name != req.Name })
+		cfg := s.cfg
+		s.mu.Unlock()
+		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -109,6 +124,15 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
+		s.mu.Lock()
+		s.cfg.Buckets = append(s.cfg.Buckets, config.BucketService{
+			Name:        req.Name,
+			Labels:      req.Labels,
+			Healthcheck: hcCfg,
+		})
+		cfg := s.cfg
+		s.mu.Unlock()
+		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -129,6 +153,11 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
+		s.mu.Lock()
+		s.cfg.Buckets = filterSlice(s.cfg.Buckets, func(v config.BucketService) bool { return v.Name != req.Name })
+		cfg := s.cfg
+		s.mu.Unlock()
+		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -188,6 +217,17 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
+		s.mu.Lock()
+		s.cfg.Proxies = append(s.cfg.Proxies, config.ProxyService{
+			Name:        req.Name,
+			Target:      req.Target,
+			Auth:        config.ProxyAuth{Type: req.AuthType, Token: req.Token, Username: req.Username, Password: req.Password},
+			Labels:      req.Labels,
+			Healthcheck: hcCfg,
+		})
+		cfg := s.cfg
+		s.mu.Unlock()
+		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -208,6 +248,11 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
+		s.mu.Lock()
+		s.cfg.Proxies = filterSlice(s.cfg.Proxies, func(v config.ProxyService) bool { return v.Name != req.Name })
+		cfg := s.cfg
+		s.mu.Unlock()
+		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 

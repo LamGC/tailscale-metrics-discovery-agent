@@ -11,9 +11,9 @@ import (
 
 	"tailscale.com/client/local"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/config"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/daemon"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/daemon"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
 )
 
 // RunDaemon loads config from cfgFile and starts the Agent server.

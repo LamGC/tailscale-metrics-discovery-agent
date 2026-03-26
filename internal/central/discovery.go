@@ -10,8 +10,8 @@ import (
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/tsutil"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/tsutil"
 )
 
 // discoverer queries the local Tailscale daemon and returns peers that carry

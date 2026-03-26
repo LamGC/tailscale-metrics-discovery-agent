@@ -5,7 +5,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
 )
 
 // registry holds all registered services (static, bucket, proxy).
@@ -80,4 +80,3 @@ func (r *registry) updateHealth(name string, h protocol.ServiceHealthStatus) {
 		e.Health = &h
 	}
 }
-

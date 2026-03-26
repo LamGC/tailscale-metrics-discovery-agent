@@ -16,8 +16,8 @@
 ### 从源码构建（需要 Go 1.22+）
 
 ```bash
-git clone https://github.com/lamgc/tailscale-service-discovery-agent
-cd tailscale-service-discovery-agent
+git clone https://github.com/LamGC/tailscale-metrics-discovery-agent
+cd tailscale-metrics-discovery-agent
 go build -o tsd ./cmd/tsd/
 sudo mv tsd /usr/local/bin/tsd
 ```

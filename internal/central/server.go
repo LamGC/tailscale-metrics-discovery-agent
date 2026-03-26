@@ -14,9 +14,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/config"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/daemon"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/daemon"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
 )
 
 // Server is the Central HTTP server. It serves:
@@ -223,6 +223,27 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	return <-errCh
+}
+
+// saveCentralConfig atomically writes cfg to the configured config file.
+func (s *Server) saveCentralConfig(cfg config.CentralConfig) {
+	if s.cfgFile == "" {
+		return
+	}
+	if err := config.SaveCentralConfig(s.cfgFile, cfg); err != nil {
+		log.Printf("central: failed to save config: %v", err)
+	}
+}
+
+// filterManualPeers returns a new slice with the peer at address removed.
+func filterManualPeers(peers []config.ManualPeer, address string) []config.ManualPeer {
+	out := make([]config.ManualPeer, 0, len(peers))
+	for _, p := range peers {
+		if p.Address != address {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Shutdown gracefully stops the server.

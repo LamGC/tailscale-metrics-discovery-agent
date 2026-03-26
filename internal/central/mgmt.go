@@ -6,7 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
 )
 
 // newCentralMgmtServer returns an *http.Server for Central's management API.
@@ -107,6 +108,15 @@ func newCentralMgmtServer(s *Server) *http.Server {
 			Address: req.Address,
 			Port:    req.Port,
 		})
+		s.mu.Lock()
+		s.cfg.ManualPeers = append(s.cfg.ManualPeers, config.ManualPeer{
+			Name:    req.Name,
+			Address: req.Address,
+			Port:    req.Port,
+		})
+		cfg := s.cfg
+		s.mu.Unlock()
+		s.saveCentralConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -127,6 +137,11 @@ func newCentralMgmtServer(s *Server) *http.Server {
 			http.Error(w, "peer not found", http.StatusNotFound)
 			return
 		}
+		s.mu.Lock()
+		s.cfg.ManualPeers = filterManualPeers(s.cfg.ManualPeers, req.Address)
+		cfg := s.cfg
+		s.mu.Unlock()
+		s.saveCentralConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 

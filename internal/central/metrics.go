@@ -3,7 +3,7 @@ package central
 import (
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
 )
 
 // centralCollector implements prometheus.Collector by reading live state from

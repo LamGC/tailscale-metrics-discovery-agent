@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"log"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/config"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/daemon"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/daemon"
 )
 
 // RunDaemon loads config from cfgFile and starts the Central server.
@@ -29,6 +30,11 @@ func RunDaemon(cfgFile string) error {
 	srv := NewServer(cfg)
 	srv.cfgFile = cfgFile
 
+	// Compute the peer cache file path (same directory as config file).
+	peersFile := peerCacheFile(cfgFile)
+	srv.col.peersFile = peersFile
+	srv.col.loadPeerCache()
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- srv.Start(ctx)
@@ -45,4 +51,13 @@ func RunDaemon(cfgFile string) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// peerCacheFile returns the peer history cache path for the given config file.
+// It sits in the same directory as the config file.
+func peerCacheFile(cfgFile string) string {
+	if cfgFile == "" {
+		return filepath.Join(config.ConfigDir("central"), "central-peers.json")
+	}
+	return filepath.Join(filepath.Dir(cfgFile), "central-peers.json")
 }

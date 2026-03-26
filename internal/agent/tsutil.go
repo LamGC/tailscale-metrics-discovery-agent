@@ -6,8 +6,8 @@ import (
 
 	"tailscale.com/client/local"
 
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/protocol"
-	"github.com/lamgc/tailscale-service-discovery-agent/internal/tsutil"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/tsutil"
 )
 
 // detectSelfTailscaleIP returns the first IPv4 address assigned to this node
