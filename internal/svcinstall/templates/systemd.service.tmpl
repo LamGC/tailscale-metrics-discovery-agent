@@ -1,0 +1,15 @@
+[Unit]
+Description=Tailscale Metrics Discovery — {{.Role}}
+After=network.target
+Wants=tailscaled.service
+
+[Service]
+Type=simple
+ExecStart={{.BinaryPath}} {{.Role}} daemon --config {{.ConfigFile}}
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

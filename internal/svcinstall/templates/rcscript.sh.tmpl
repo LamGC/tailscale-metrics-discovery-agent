@@ -1,0 +1,16 @@
+#!/bin/sh
+# PROVIDE: {{.RcName}}
+# REQUIRE: NETWORKING
+# OPTIONAL: tailscale
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="{{.RcName}}"
+rcvar="{{.RcName}}_enable"
+command="{{.BinaryPath}}"
+command_args="{{.Role}} daemon --config {{.ConfigFile}}"
+pidfile="/var/run/${name}.pid"
+
+load_rc_config $name
+run_rc_command "$1"

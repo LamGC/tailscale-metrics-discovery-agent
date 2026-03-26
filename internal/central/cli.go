@@ -10,8 +10,10 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/daemon"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/svcinstall"
 )
 
 // CLIStatus queries the running Central daemon for its status.
@@ -353,6 +355,67 @@ func formatDuration(d time.Duration) string {
 	}
 	return fmt.Sprintf("%dh", hours)
 }
+
+// InstallCmd returns the "tsd central install" command.
+func InstallCmd() *cobra.Command {
+	var (
+		configFile string
+		initSystem string
+	)
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install tsd central as a system service",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			binary, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("could not determine binary path: %w", err)
+			}
+
+			cfgPath := configFile
+			if cfgPath == "" {
+				cfgPath = config.DefaultConfigFile("central")
+			}
+
+			cfg := svcinstall.Config{
+				Role:       svcinstall.RoleCentral,
+				BinaryPath: binary,
+				ConfigFile: cfgPath,
+				Init:       svcinstall.InitSystem(initSystem),
+			}
+			return svcinstall.Install(cfg)
+		},
+	}
+	cmd.Flags().StringVar(&configFile, "config", "", "Config file path (default: /etc/tsd/central.toml for root, ~/.tsd/central.toml otherwise)")
+	cmd.Flags().StringVar(&initSystem, "init", "auto", "Init system: auto, systemd, sysvinit, launchd, rc.d")
+	return cmd
+}
+
+// UninstallCmd returns the "tsd central uninstall" command.
+func UninstallCmd() *cobra.Command {
+	var initSystem string
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove tsd central from system services",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			binary, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("could not determine binary path: %w", err)
+			}
+
+			cfg := svcinstall.Config{
+				Role:       svcinstall.RoleCentral,
+				BinaryPath: binary,
+				ConfigFile: "", // not needed for uninstall
+				Init:       svcinstall.InitSystem(initSystem),
+			}
+			return svcinstall.Uninstall(cfg)
+		},
+	}
+	cmd.Flags().StringVar(&initSystem, "init", "auto", "Init system: auto, systemd, sysvinit, launchd, rc.d")
+	return cmd
+}
+
+// --- helpers ---
 
 // portFromURL extracts the port from an "http://host:port" URL string.
 func portFromURL(u string) string {

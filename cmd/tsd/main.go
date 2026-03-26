@@ -69,6 +69,8 @@ func centralCmd() *cobra.Command {
 	cmd.AddCommand(daemonCmd, statusCmd, discoverCmd)
 	cmd.AddCommand(central.PeerCmd())
 	cmd.AddCommand(central.HealthCmd())
+	cmd.AddCommand(central.InstallCmd())
+	cmd.AddCommand(central.UninstallCmd())
 	return cmd
 }
 
@@ -102,6 +104,8 @@ func agentCmd() *cobra.Command {
 	cmd.AddCommand(agent.ServiceCmd())
 	cmd.AddCommand(agent.BucketCmd())
 	cmd.AddCommand(agent.ProxyCmd())
+	cmd.AddCommand(agent.InstallCmd())
+	cmd.AddCommand(agent.UninstallCmd())
 
 	return cmd
 }

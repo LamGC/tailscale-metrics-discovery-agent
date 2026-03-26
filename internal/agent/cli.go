@@ -9,8 +9,10 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/daemon"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/svcinstall"
 )
 
 // ServiceCmd returns the "tsd agent service" subcommand.
@@ -246,6 +248,65 @@ func proxyRemoveCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&socket, "socket", "", "Management socket path")
+	return cmd
+}
+
+// InstallCmd returns the "tsd agent install" command.
+func InstallCmd() *cobra.Command {
+	var (
+		configFile string
+		initSystem string
+	)
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install tsd agent as a system service",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			binary, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("could not determine binary path: %w", err)
+			}
+
+			cfgPath := configFile
+			if cfgPath == "" {
+				cfgPath = config.DefaultConfigFile("agent")
+			}
+
+			cfg := svcinstall.Config{
+				Role:       svcinstall.RoleAgent,
+				BinaryPath: binary,
+				ConfigFile: cfgPath,
+				Init:       svcinstall.InitSystem(initSystem),
+			}
+			return svcinstall.Install(cfg)
+		},
+	}
+	cmd.Flags().StringVar(&configFile, "config", "", "Config file path (default: /etc/tsd/agent.toml for root, ~/.tsd/agent.toml otherwise)")
+	cmd.Flags().StringVar(&initSystem, "init", "auto", "Init system: auto, systemd, sysvinit, launchd, rc.d")
+	return cmd
+}
+
+// UninstallCmd returns the "tsd agent uninstall" command.
+func UninstallCmd() *cobra.Command {
+	var initSystem string
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove tsd agent from system services",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			binary, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("could not determine binary path: %w", err)
+			}
+
+			cfg := svcinstall.Config{
+				Role:       svcinstall.RoleAgent,
+				BinaryPath: binary,
+				ConfigFile: "", // not needed for uninstall
+				Init:       svcinstall.InitSystem(initSystem),
+			}
+			return svcinstall.Uninstall(cfg)
+		},
+	}
+	cmd.Flags().StringVar(&initSystem, "init", "auto", "Init system: auto, systemd, sysvinit, launchd, rc.d")
 	return cmd
 }
 
