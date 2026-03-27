@@ -1,4 +1,4 @@
-# tsd — Tailscale Service Discovery
+# Tailscale Metrics Discovery Agent
 
 `tsd` 是一个基于 Tailscale ACL Tag 的 Prometheus 服务发现工具。它由两个角色组成，编译为单一二进制文件：
 
