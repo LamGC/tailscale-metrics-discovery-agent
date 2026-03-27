@@ -47,6 +47,9 @@ archives:
           - zip
     name_template: "tsd_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
     files:
+      - src: "{{ .Binary }}*"
+        info:
+          mode: 0755
       - LICENSE
       - README.md
 
