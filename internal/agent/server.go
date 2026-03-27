@@ -546,3 +546,18 @@ func (s *Server) removeStatic(name string) error {
 	s.hc.Unregister(name)
 	return s.reg.remove(name)
 }
+
+// Handler returns the HTTP handler for use with httptest.NewServer in tests.
+func (s *Server) Handler() http.Handler {
+	return s.mux
+}
+
+// AddStaticForTest is a test helper that exposes addStatic to external test packages.
+func (s *Server) AddStaticForTest(name string, targets []string, labels map[string]string, hcCfg *config.HealthcheckConfig) error {
+	return s.addStatic(name, targets, labels, hcCfg)
+}
+
+// AddProxyForTest is a test helper that exposes addProxy to external test packages.
+func (s *Server) AddProxyForTest(name, target, authType, token, username, password string, labels map[string]string, hcCfg *config.HealthcheckConfig) error {
+	return s.addProxy(name, target, proxyAuth{authType: authType, token: token, username: username, password: password}, labels, hcCfg)
+}
