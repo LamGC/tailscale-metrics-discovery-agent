@@ -44,6 +44,11 @@ type DiscoveryConfig struct {
 	RefreshInterval Duration `toml:"refresh_interval"`
 	// AgentToken is the optional Bearer token sent when querying Agents.
 	AgentToken string `toml:"agent_token"`
+	// NodeAttrs enables automatic configuration via Tailscale ACL nodeAttrs.
+	// When true (default), Central reads custom:tsd-agent-tag and
+	// custom:tsd-agent-port from its own node attributes to override
+	// Tags and AgentPort. Set to false to ignore nodeAttrs entirely.
+	NodeAttrs bool `toml:"node_attrs"`
 }
 
 // CentralManagement configures the Unix-socket management API.
@@ -92,6 +97,7 @@ func DefaultCentralConfig() CentralConfig {
 			Tags:            []string{"tag:prometheus-agent"},
 			AgentPort:       9001,
 			RefreshInterval: Duration{60 * time.Second},
+			NodeAttrs:       true,
 		},
 		Management: CentralManagement{
 			Socket: DefaultSocketPath("central"),

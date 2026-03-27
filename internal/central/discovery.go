@@ -22,6 +22,11 @@ type discoverer struct {
 	mu   sync.RWMutex
 	tags map[string]struct{}
 	port int
+
+	// selfAttrs holds nodeAttrs read from this node's CapMap.
+	// nil means nodeAttrs are not configured or not valid.
+	selfAttrsMu sync.RWMutex
+	selfAttrs   *tsutil.TSDNodeAttrs
 }
 
 func newDiscoverer(socketPath string, tags []string, agentPort int) *discoverer {
@@ -50,6 +55,29 @@ func toTagSet(tags []string) map[string]struct{} {
 	return s
 }
 
+// RefreshSelfAttrs reads this node's Tailscale nodeAttrs and caches the result.
+// On error, the previous cached value is retained (not cleared).
+func (d *discoverer) RefreshSelfAttrs(ctx context.Context) {
+	attrs, err := tsutil.ReadSelfNodeAttrs(ctx, &d.lc)
+	if err != nil {
+		log.Printf("central: failed to read nodeAttrs: %v (retaining previous)", err)
+		return
+	}
+	d.selfAttrsMu.Lock()
+	d.selfAttrs = attrs
+	d.selfAttrsMu.Unlock()
+	if attrs != nil {
+		log.Printf("central: nodeAttrs: agent tags=%v, port=%d", attrs.AgentTags, attrs.AgentPort)
+	}
+}
+
+// ClearSelfAttrs removes cached nodeAttrs (used when node_attrs is disabled).
+func (d *discoverer) ClearSelfAttrs() {
+	d.selfAttrsMu.Lock()
+	d.selfAttrs = nil
+	d.selfAttrsMu.Unlock()
+}
+
 // TailscaleStatus returns the current Tailscale daemon state for this node.
 func (d *discoverer) TailscaleStatus(ctx context.Context) *protocol.TailscaleStatus {
 	return tsutil.QueryStatus(ctx, &d.lc)
@@ -58,12 +86,29 @@ func (d *discoverer) TailscaleStatus(ctx context.Context) *protocol.TailscaleSta
 // Discover returns all online peers that have at least one matching tag.
 // Offline peers (Tailscale node not online) are returned with
 // AgentHealth = AgentHealthOffline and no AgentURL.
+//
+// If valid nodeAttrs are cached, they override the config-based tags and port.
+// PeerInfo.Tags contains only the matched tags (intersection of node tags and
+// the discovery tag set), not all of the node's tags.
 func (d *discoverer) Discover(ctx context.Context) ([]protocol.PeerInfo, error) {
 	// Snapshot config under read-lock to avoid holding the lock during I/O.
 	d.mu.RLock()
 	tags := d.tags
 	port := d.port
 	d.mu.RUnlock()
+
+	// Override with nodeAttrs if available.
+	d.selfAttrsMu.RLock()
+	attrs := d.selfAttrs
+	d.selfAttrsMu.RUnlock()
+	if attrs != nil {
+		if len(attrs.AgentTags) > 0 {
+			tags = toTagSet(attrs.AgentTags)
+		}
+		if attrs.AgentPort > 0 {
+			port = attrs.AgentPort
+		}
+	}
 
 	st, err := d.lc.Status(ctx)
 	if err != nil {
@@ -72,7 +117,8 @@ func (d *discoverer) Discover(ctx context.Context) ([]protocol.PeerInfo, error) 
 
 	var peers []protocol.PeerInfo
 	for _, peer := range st.Peer {
-		if !matchesTags(peer.Tags, tags) {
+		matched := matchedTagSlice(peer.Tags, tags)
+		if len(matched) == 0 {
 			continue
 		}
 		tsIP := pickIP(peer.TailscaleIPs)
@@ -82,7 +128,7 @@ func (d *discoverer) Discover(ctx context.Context) ([]protocol.PeerInfo, error) 
 		info := protocol.PeerInfo{
 			Hostname:    peer.HostName,
 			TailscaleIP: tsIP,
-			Tags:        peer.Tags.AsSlice(),
+			Tags:        matched,
 			Source:      protocol.PeerSourceAuto,
 		}
 		if peer.Online {
@@ -143,6 +189,21 @@ func matchesTags(tags interface{ AsSlice() []string }, set map[string]struct{}) 
 		}
 	}
 	return false
+}
+
+// matchedTagSlice returns the intersection of a node's tags and the discovery
+// tag set. Returns nil if there are no matches.
+func matchedTagSlice(tags interface{ AsSlice() []string }, set map[string]struct{}) []string {
+	if tags == nil {
+		return nil
+	}
+	var matched []string
+	for _, t := range tags.AsSlice() {
+		if _, ok := set[t]; ok {
+			matched = append(matched, t)
+		}
+	}
+	return matched
 }
 
 // pickIP returns the first IPv4 address, or the first address of any family.

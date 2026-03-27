@@ -30,6 +30,11 @@ func RunDaemon(cfgFile string) error {
 	srv := NewServer(cfg)
 	srv.cfgFile = cfgFile
 
+	// Read nodeAttrs from Tailscale before starting the collector loop.
+	if cfg.Discovery.NodeAttrs {
+		srv.col.discoverer.RefreshSelfAttrs(ctx)
+	}
+
 	// Compute the peer cache file path (same directory as config file).
 	peersFile := peerCacheFile(cfgFile)
 	srv.col.peersFile = peersFile

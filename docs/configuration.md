@@ -38,6 +38,11 @@ refresh_interval = "60s"
 # 需与 Agent 配置中的 server.token 保持一致
 agent_token = ""
 
+# 是否启用 Tailscale nodeAttrs 自动配置（默认 true）
+# 设为 true 时，Central 从自身的 Tailscale nodeAttrs 读取 Agent Tag 和端口，
+# 覆盖上方的 tags 和 agent_port；设为 false 则完全使用本地配置
+node_attrs = true
+
 # ── 管理 API ───────────────────────────────────────────────────────────────
 [management]
 # 管理 socket 路径
@@ -77,6 +82,7 @@ register_self = false
 | `discovery.agent_port` | `9001` | 所有 Agent 使用同一端口（当前设计） |
 | `discovery.refresh_interval` | `60s` | 支持 Go duration 格式：`30s`、`2m`、`1h` |
 | `discovery.agent_token` | `""` | 对应 Agent 的 `server.token` |
+| `discovery.node_attrs` | `true` | 是否从 Tailscale nodeAttrs 自动读取发现配置，详见 [nodeAttrs 文档](node-attrs.md) |
 | `management.socket` | `/tmp/tsd-central.sock` | CLI 通过此 socket 与 daemon 通信 |
 | `self_metrics.enabled` | `true` | 是否暴露 `/metrics` 端点 |
 | `self_metrics.path` | `/metrics` | 指标端点路径 |
@@ -96,6 +102,17 @@ listen = ":9001"
 
 # 可选：Central 查询 /api/v1/services 时必须携带的 Bearer Token
 token = ""
+
+# 是否启用 Tailscale nodeAttrs 自动鉴权（默认 true）
+# 设为 true 时，Agent 从自身的 Tailscale nodeAttrs 读取授权的 Central ACL Tag，
+# 通过 WhoIs 验证请求方身份；设为 false 则仅使用 Bearer token 鉴权
+node_attrs = true
+
+# 当 ACL Tag 鉴权已启用但未提供 Bearer token 时，是否允许匿名访问（默认 false）
+# 仅在 nodeAttrs 自动配置读取到有效配置时生效；否则此项无效
+# false：ACL Tag 不匹配的请求必须提供匹配的 Bearer token，否则 401（安全默认）
+# true：恢复为完全开放访问，ACL Tag 仅作访问优化而非强制门禁
+allow_anonymous = false
 
 # ── 管理 API ───────────────────────────────────────────────────────────────
 [management]

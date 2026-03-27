@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 
+	"tailscale.com/client/local"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -18,6 +20,7 @@ import (
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/daemon"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/tsutil"
 )
 
 // Server is the Agent HTTP server. It serves:
@@ -41,6 +44,10 @@ type Server struct {
 	metricsSrv   *http.Server        // optional dedicated metrics listener
 	selfAddr     string              // host:port announced in SDTargets for dynamic services
 	extraTargets []protocol.SDTarget // appended to /api/v1/services when register_self=true
+
+	// ACL Tag-based auth via Tailscale nodeAttrs.
+	lc           local.Client
+	allowedCTags []string // authorized Central ACL tags from nodeAttrs; empty = disabled
 }
 
 // NewServer creates a new Agent Server from the given config.
@@ -71,18 +78,101 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
-// authMiddleware enforces Bearer token auth when a token is configured.
+// authMiddleware enforces authentication. Checks (in order):
+//  1. ACL Tag verification via Tailscale WhoIs (if nodeAttrs configured)
+//  2. Bearer token (if configured)
+//
+// When ACL Tag auth is active (allowedCTags non-empty):
+//   - ACL Tag match → allow
+//   - ACL Tag mismatch/WhoIs fail → check Bearer token
+//     - Token configured: token must match → allow, else 401
+//     - Token not configured: decide via allow_anonymous flag
+//       - allow_anonymous=true → allow (open access)
+//       - allow_anonymous=false (default) → 401
+//
+// When ACL Tag auth is inactive (allowedCTags empty):
+//   - allow_anonymous has no effect
+//   - Token configured: token must match → allow, else 401
+//   - Token not configured: allow (open access, backward compatible)
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		s.mu.RLock()
 		token := s.cfg.Server.Token
+		allowedTags := s.allowedCTags
+		allowAnon := s.cfg.Server.AllowAnonymous
 		s.mu.RUnlock()
+
+		// ACL Tag verification (when nodeAttrs auto-config is active).
+		if len(allowedTags) > 0 {
+			resp, err := s.lc.WhoIs(r.Context(), r.RemoteAddr)
+			if err == nil && resp.Node != nil {
+				if tagsIntersect(resp.Node.Tags, allowedTags) {
+					next(w, r) // ACL Tag match → allow
+					return
+				}
+			}
+			// ACL Tag mismatch or WhoIs failed → check token as fallback.
+			// If no token: allow only if allow_anonymous=true.
+			if token == "" {
+				if allowAnon {
+					next(w, r) // allow anonymous
+					return
+				}
+				// ACL Tag required, no token configured → reject.
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			// Token configured; fall through to token check.
+		}
+
+		// Bearer token check (standalone or fallback auth).
 		if token != "" && r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
+
+		// Token matches or no token + no ACL Tag configured → allow.
 		next(w, r)
 	}
+}
+
+// tagsIntersect returns true if any of the node's tags is in the allowed set.
+func tagsIntersect(nodeTags []string, allowed []string) bool {
+	set := make(map[string]struct{}, len(allowed))
+	for _, t := range allowed {
+		set[t] = struct{}{}
+	}
+	for _, t := range nodeTags {
+		if _, ok := set[t]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// LoadNodeAttrs reads this node's Tailscale nodeAttrs and updates ACL auth config.
+// On error, the previous values are retained. Safe for concurrent use.
+func (s *Server) LoadNodeAttrs(ctx context.Context) {
+	attrs, err := tsutil.ReadSelfNodeAttrs(ctx, &s.lc)
+	if err != nil {
+		log.Printf("agent: failed to read nodeAttrs: %v (retaining previous)", err)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if attrs != nil && len(attrs.CentralTags) > 0 {
+		s.allowedCTags = attrs.CentralTags
+		log.Printf("agent: ACL-based auth enabled, allowed central tags: %v", attrs.CentralTags)
+	} else {
+		s.allowedCTags = nil
+	}
+}
+
+// ClearNodeAttrs removes ACL tag auth config (used when node_attrs is disabled).
+func (s *Server) ClearNodeAttrs() {
+	s.mu.Lock()
+	s.allowedCTags = nil
+	s.mu.Unlock()
 }
 
 // Reload re-reads the config file and applies safe changes without restarting.
@@ -98,6 +188,13 @@ func (s *Server) Reload() error {
 	s.mu.Lock()
 	s.cfg = cfg
 	s.mu.Unlock()
+
+	// Handle node_attrs toggle on reload.
+	if cfg.Server.NodeAttrs {
+		s.LoadNodeAttrs(context.Background())
+	} else {
+		s.ClearNodeAttrs()
+	}
 
 	s.reloadConfigServices(cfg)
 	log.Printf("agent: config reloaded from %s", s.cfgFile)

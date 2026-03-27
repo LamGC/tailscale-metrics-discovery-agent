@@ -94,6 +94,14 @@ func (s *Server) Reload() error {
 	s.col.UpdateAgentToken(cfg.Discovery.AgentToken)
 	s.col.discoverer.UpdateConfig(cfg.Discovery.Tags, cfg.Discovery.AgentPort)
 	s.col.ReplaceConfigPeers(cfg.ManualPeers)
+
+	// Handle node_attrs toggle on reload.
+	if cfg.Discovery.NodeAttrs {
+		s.col.discoverer.RefreshSelfAttrs(context.Background())
+	} else {
+		s.col.discoverer.ClearSelfAttrs()
+	}
+
 	log.Printf("central: config reloaded from %s", s.cfgFile)
 	return nil
 }
@@ -181,7 +189,7 @@ func resolveListenToTarget(listenAddr, path string) string {
 // servers. It blocks until one of the servers returns an error.
 func (s *Server) Start(ctx context.Context) error {
 	s.setupMetrics()
-	go s.col.Run(ctx, s.cfg.Discovery.RefreshInterval.Duration)
+	go s.col.Run(ctx, s.cfg.Discovery.RefreshInterval.Duration, s.cfg.Discovery.NodeAttrs)
 
 	s.httpSrv = &http.Server{
 		Addr:    s.cfg.Server.Listen,

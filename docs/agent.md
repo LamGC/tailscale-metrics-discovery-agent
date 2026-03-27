@@ -256,6 +256,12 @@ register_self = true
 
 ---
 
+## nodeAttrs ACL 鉴权
+
+Agent 支持通过 Tailscale ACL `nodeAttrs` 自动验证请求方身份（基于 ACL Tag），无需配置 Bearer token 即可实现安全访问控制。详见 [nodeAttrs 集中配置](node-attrs.md)。
+
+---
+
 ## 配置文件 vs 运行时 CLI
 
 | 操作方式 | 持久化 | 说明 |

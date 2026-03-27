@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"tailscale.com/client/local"
+	"tailscale.com/ipn"
 
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/daemon"
@@ -45,11 +46,10 @@ func RunDaemon(cfgFile string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// If Tailscale was not available at startup, retry in background until we
-	// get an IP so bucket/proxy endpoints appear in the SD targets list.
-	if srv.selfAddr == "" && listenPort != "" {
-		go watchTailscaleConnect(ctx, srv, listenPort)
-	}
+	// Start a persistent Tailscale watcher that handles:
+	// 1. Detecting/updating self IP for SD targets (replaces watchTailscaleConnect)
+	// 2. Loading nodeAttrs for ACL-based auth (when node_attrs is enabled)
+	go watchTailscale(ctx, srv, listenPort, cfg.Server.NodeAttrs)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -84,39 +84,102 @@ func CLIStatus(socketPath string) error {
 	return nil
 }
 
-// watchTailscaleConnect polls Tailscale every 10 seconds until an IP is
-// obtained, then updates srv.selfAddr and logs the connection.
-func watchTailscaleConnect(ctx context.Context, srv *Server, listenPort string) {
+// watchTailscale listens on the Tailscale IPN bus to:
+//  1. Detect and update the self Tailscale IP for SD targets
+//  2. Reload nodeAttrs for ACL Tag-based auth on connect and ACL policy changes
+//
+// It auto-reconnects on errors with a brief pause. Blocks until ctx is cancelled.
+func watchTailscale(ctx context.Context, srv *Server, listenPort string, nodeAttrs bool) {
 	var lc local.Client
-	for {
+
+	lastFailed := false
+	for ctx.Err() == nil {
+		const mask = ipn.NotifyInitialNetMap | ipn.NotifyRateLimit
+		watcher, err := lc.WatchIPNBus(ctx, mask)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if !lastFailed {
+				log.Printf("agent: WatchIPNBus unavailable (%v); will retry", err)
+			}
+			lastFailed = true
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+			continue
+		}
+
+		// Connected.
+		if lastFailed {
+			log.Printf("agent: reconnected to Tailscale IPN bus")
+		}
+		lastFailed = false
+
+		// On connect: detect IP and load nodeAttrs.
+		detectAndSetSelfIP(ctx, &lc, srv, listenPort)
+		if nodeAttrs {
+			srv.LoadNodeAttrs(ctx)
+		}
+
+		// Watch for netmap changes.
+		for {
+			n, err := watcher.Next()
+			if err != nil {
+				watcher.Close()
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("agent: WatchIPNBus error: %v; reconnecting", err)
+				break
+			}
+			if n.NetMap != nil {
+				detectAndSetSelfIP(ctx, &lc, srv, listenPort)
+				if nodeAttrs {
+					srv.LoadNodeAttrs(ctx)
+				}
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(10 * time.Second):
+		case <-time.After(5 * time.Second):
 		}
-		st, err := lc.Status(ctx)
-		if err != nil {
-			continue
-		}
-		var tsIP string
-		for _, addr := range st.TailscaleIPs {
-			if addr.Is4() {
-				tsIP = addr.String()
-				break
-			}
-		}
-		if tsIP == "" && len(st.TailscaleIPs) > 0 {
-			tsIP = st.TailscaleIPs[0].String()
-		}
-		if tsIP == "" {
-			continue
-		}
-		newAddr := tsIP + ":" + listenPort
-		srv.mu.Lock()
-		srv.selfAddr = newAddr
-		srv.mu.Unlock()
-		log.Printf("agent: connected to Tailscale, self address: %s", newAddr)
+	}
+}
+
+// detectAndSetSelfIP queries Tailscale status and updates srv.selfAddr.
+func detectAndSetSelfIP(ctx context.Context, lc *local.Client, srv *Server, listenPort string) {
+	if listenPort == "" {
 		return
+	}
+	st, err := lc.Status(ctx)
+	if err != nil {
+		return
+	}
+	var tsIP string
+	for _, addr := range st.TailscaleIPs {
+		if addr.Is4() {
+			tsIP = addr.String()
+			break
+		}
+	}
+	if tsIP == "" && len(st.TailscaleIPs) > 0 {
+		tsIP = st.TailscaleIPs[0].String()
+	}
+	if tsIP == "" {
+		return
+	}
+	newAddr := tsIP + ":" + listenPort
+	srv.mu.Lock()
+	old := srv.selfAddr
+	srv.selfAddr = newAddr
+	srv.mu.Unlock()
+	if old != newAddr {
+		log.Printf("agent: Tailscale self address: %s", newAddr)
 	}
 }
 

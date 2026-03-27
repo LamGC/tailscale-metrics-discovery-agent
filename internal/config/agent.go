@@ -24,6 +24,17 @@ type AgentServer struct {
 	// Token is an optional Bearer token that Central must present when
 	// querying /api/v1/services. Leave empty to disable auth.
 	Token string `toml:"token"`
+	// NodeAttrs enables automatic ACL-based authentication via Tailscale
+	// nodeAttrs. When true (default), Agent reads custom:tsd-central-tag
+	// from its own node attributes and verifies incoming requests via
+	// Tailscale WhoIs. Set to false to ignore nodeAttrs entirely.
+	NodeAttrs bool `toml:"node_attrs"`
+	// AllowAnonymous controls whether unauthenticated requests are allowed
+	// when ACL Tag auth is active (allowedCTags non-empty) but no Bearer token
+	// is configured. When false (default), requests that fail ACL Tag verification
+	// must provide a matching Bearer token. Has no effect when nodeAttrs auto-config
+	// is not active. Enables explicit "require ACL Tag XOR Bearer token" semantics.
+	AllowAnonymous bool `toml:"allow_anonymous"`
 }
 
 // AgentManagement configures the Unix-socket management API.
@@ -78,7 +89,8 @@ type ProxyAuth struct {
 func DefaultAgentConfig() AgentConfig {
 	return AgentConfig{
 		Server: AgentServer{
-			Listen: ":9001",
+			Listen:    ":9001",
+			NodeAttrs: true,
 		},
 		Management: AgentManagement{
 			Socket: DefaultSocketPath("agent"),

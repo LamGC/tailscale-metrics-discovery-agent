@@ -160,7 +160,8 @@ func (c *collector) loadPeerCache() {
 
 // Run starts the background refresh loop and the WatchIPNBus listener.
 // It blocks until ctx is cancelled.
-func (c *collector) Run(ctx context.Context, interval time.Duration) {
+// If nodeAttrs is true, RefreshSelfAttrs is called on connect and netmap changes.
+func (c *collector) Run(ctx context.Context, interval time.Duration, nodeAttrs bool) {
 	triggerCh := make(chan struct{}, 1)
 
 	// WatchIPNBus goroutine; auto-restarts on disconnect.
@@ -172,8 +173,14 @@ func (c *collector) Run(ctx context.Context, interval time.Duration) {
 					if lastFailed {
 						log.Printf("central: reconnected to Tailscale IPN bus")
 					}
+					if nodeAttrs {
+						c.discoverer.RefreshSelfAttrs(ctx)
+					}
 				},
 				func() { // onchange: called on netmap change
+					if nodeAttrs {
+						c.discoverer.RefreshSelfAttrs(ctx)
+					}
 					select {
 					case triggerCh <- struct{}{}:
 					default: // refresh already queued

@@ -198,6 +198,12 @@ port    = 9002
 
 ---
 
+## nodeAttrs 自动配置
+
+Central 支持从 Tailscale ACL `nodeAttrs` 自动读取发现配置（Agent Tag 和端口），实现零本地配置的自动发现。详见 [nodeAttrs 集中配置](node-attrs.md)。
+
+---
+
 ## 鉴权配置
 
 ### Central ↔ Prometheus 鉴权
