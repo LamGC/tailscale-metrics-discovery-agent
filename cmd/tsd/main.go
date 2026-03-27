@@ -9,6 +9,7 @@ import (
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/agent"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/central"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/version"
 )
 
 func main() {
@@ -19,6 +20,7 @@ func main() {
 
 	root.AddCommand(centralCmd())
 	root.AddCommand(agentCmd())
+	root.AddCommand(versionCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -108,4 +110,14 @@ func agentCmd() *cobra.Command {
 	cmd.AddCommand(agent.UninstallCmd())
 
 	return cmd
+}
+
+func versionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Show version and build information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(version.Info())
+		},
+	}
 }
