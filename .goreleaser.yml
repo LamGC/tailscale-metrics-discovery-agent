@@ -3,6 +3,9 @@ version: 2
 project_name: tsd
 dist: build
 
+git:
+  tag_sort: -version:refname
+
 builds:
   - id: tsd
     main: ./cmd/tsd
@@ -47,9 +50,6 @@ archives:
           - zip
     name_template: "tsd_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
     files:
-      - src: "{{ .Binary }}*"
-        info:
-          mode: 0755
       - LICENSE
       - README.md
 
@@ -61,6 +61,7 @@ release:
   draft: true
   replace_existing_draft: true
   name_template: "{{.Tag}}"
+  prerelease: auto
 
 changelog:
   sort: asc
