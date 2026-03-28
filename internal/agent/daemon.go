@@ -33,8 +33,21 @@ func RunDaemon(cfgFile string) error {
 	srv := NewServer(cfg)
 	srv.cfgFile = cfgFile
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Load nodeAttrs BEFORE starting the HTTP server so that AgentPort
+	// from nodeAttrs can override the listen address before binding.
+	if cfg.Server.NodeAttrs {
+		srv.LoadNodeAttrs(ctx)
+	}
+
 	// Detect Tailscale IP for self-referential SDTargets (bucket/proxy endpoints).
-	_, listenPort, _ := splitHostPort(cfg.Server.Listen)
+	// Read the listen port from cfg AFTER nodeAttrs may have overridden it.
+	srv.mu.RLock()
+	listenAddr := srv.cfg.Server.Listen
+	srv.mu.RUnlock()
+	_, listenPort, _ := splitHostPort(listenAddr)
 	tsIP, err := detectSelfTailscaleIP()
 	if err != nil {
 		log.Printf("agent: could not detect Tailscale IP (%v); will retry in background", err)
@@ -43,13 +56,10 @@ func RunDaemon(cfgFile string) error {
 		log.Printf("agent: Tailscale IP detected, self address: %s", srv.selfAddr)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	// Start a persistent Tailscale watcher that handles:
-	// 1. Detecting/updating self IP for SD targets (replaces watchTailscaleConnect)
-	// 2. Loading nodeAttrs for ACL-based auth (when node_attrs is enabled)
-	go watchTailscale(ctx, srv, listenPort, cfg.Server.NodeAttrs)
+	// 1. Detecting/updating self IP for SD targets
+	// 2. Reloading nodeAttrs for ACL-based auth on connect and ACL policy changes
+	go watchTailscale(ctx, srv, cfg.Server.NodeAttrs)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -89,7 +99,7 @@ func CLIStatus(socketPath string) error {
 //  2. Reload nodeAttrs for ACL Tag-based auth on connect and ACL policy changes
 //
 // It auto-reconnects on errors with a brief pause. Blocks until ctx is cancelled.
-func watchTailscale(ctx context.Context, srv *Server, listenPort string, nodeAttrs bool) {
+func watchTailscale(ctx context.Context, srv *Server, nodeAttrs bool) {
 	var lc local.Client
 
 	lastFailed := false
@@ -118,11 +128,11 @@ func watchTailscale(ctx context.Context, srv *Server, listenPort string, nodeAtt
 		}
 		lastFailed = false
 
-		// On connect: detect IP and load nodeAttrs.
-		detectAndSetSelfIP(ctx, &lc, srv, listenPort)
+		// On connect: load nodeAttrs first (may update port), then detect IP.
 		if nodeAttrs {
 			srv.LoadNodeAttrs(ctx)
 		}
+		detectAndSetSelfIP(ctx, &lc, srv)
 
 		// Watch for netmap changes.
 		for {
@@ -136,10 +146,10 @@ func watchTailscale(ctx context.Context, srv *Server, listenPort string, nodeAtt
 				break
 			}
 			if n.NetMap != nil {
-				detectAndSetSelfIP(ctx, &lc, srv, listenPort)
 				if nodeAttrs {
 					srv.LoadNodeAttrs(ctx)
 				}
+				detectAndSetSelfIP(ctx, &lc, srv)
 			}
 		}
 
@@ -151,8 +161,15 @@ func watchTailscale(ctx context.Context, srv *Server, listenPort string, nodeAtt
 	}
 }
 
-// detectAndSetSelfIP queries Tailscale status and updates srv.selfAddr.
-func detectAndSetSelfIP(ctx context.Context, lc *local.Client, srv *Server, listenPort string) {
+// detectAndSetSelfIP queries Tailscale status and updates srv.selfAddr
+// using the current listen port from srv.cfg (which may have been updated
+// by nodeAttrs).
+func detectAndSetSelfIP(ctx context.Context, lc *local.Client, srv *Server) {
+	srv.mu.RLock()
+	listenAddr := srv.cfg.Server.Listen
+	srv.mu.RUnlock()
+
+	_, listenPort, _ := splitHostPort(listenAddr)
 	if listenPort == "" {
 		return
 	}

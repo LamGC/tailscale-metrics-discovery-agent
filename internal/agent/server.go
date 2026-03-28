@@ -150,7 +150,10 @@ func tagsIntersect(nodeTags []string, allowed []string) bool {
 	return false
 }
 
-// LoadNodeAttrs reads this node's Tailscale nodeAttrs and updates ACL auth config.
+// LoadNodeAttrs reads this node's Tailscale nodeAttrs and updates:
+//   - ACL auth config (allowedCTags) from CentralTags
+//   - Listen port from AgentPort (updates cfg.Server.Listen)
+//
 // On error, the previous values are retained. Safe for concurrent use.
 func (s *Server) LoadNodeAttrs(ctx context.Context) {
 	attrs, err := tsutil.ReadSelfNodeAttrs(ctx, &s.lc)
@@ -160,11 +163,22 @@ func (s *Server) LoadNodeAttrs(ctx context.Context) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if attrs != nil && len(attrs.CentralTags) > 0 {
+	if attrs == nil {
+		s.allowedCTags = nil
+		return
+	}
+	if len(attrs.CentralTags) > 0 {
 		s.allowedCTags = attrs.CentralTags
 		log.Printf("agent: ACL-based auth enabled, allowed central tags: %v", attrs.CentralTags)
 	} else {
 		s.allowedCTags = nil
+	}
+	if attrs.AgentPort > 0 {
+		newListen := fmt.Sprintf(":%d", attrs.AgentPort)
+		if s.cfg.Server.Listen != newListen {
+			log.Printf("agent: nodeAttrs overriding listen port to %s", newListen)
+			s.cfg.Server.Listen = newListen
+		}
 	}
 }
 
