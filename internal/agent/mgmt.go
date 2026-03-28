@@ -17,7 +17,12 @@ func newMgmtServer(s *Server) *http.Server {
 	// GET /status — basic liveness / info
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		ts := agentTailscaleStatus(r.Context())
-		writeJSON(w, protocol.StatusResponse{Running: true, Info: "agent", Tailscale: ts})
+		writeJSON(w, protocol.StatusResponse{
+			Running:   true,
+			Info:      "agent",
+			Tailscale: ts,
+			Clients:   s.clientAccessList(),
+		})
 	})
 
 	// GET /services — list all registered services

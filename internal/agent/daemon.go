@@ -91,6 +91,7 @@ func CLIStatus(socketPath string) error {
 	}
 	fmt.Fprintln(os.Stdout, "Agent daemon is running.")
 	printAgentTailscaleStatus(st.Tailscale)
+	printClientAccess(st.Clients)
 	return nil
 }
 

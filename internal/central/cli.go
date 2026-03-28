@@ -3,6 +3,7 @@ package central
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -31,8 +32,8 @@ func CLIStatus(socketPath string) error {
 	return nil
 }
 
-// CLIDiscover queries the running Central daemon for its discovered peers
-// and prints a colour-coded table.
+// CLIDiscover queries the running Central daemon for its aggregated SD targets
+// and prints them in a human-readable table.
 func CLIDiscover(socketPath string, useColor string) error {
 	if socketPath == "" {
 		socketPath = daemon.DefaultCentralSocket()
@@ -40,25 +41,34 @@ func CLIDiscover(socketPath string, useColor string) error {
 	applyColorFlag(useColor)
 
 	c := daemon.NewClient(socketPath)
-	var resp protocol.PeersResponse
-	if err := c.Get("/peers", &resp); err != nil {
+	var targets []protocol.SDTarget
+	if err := c.Get("/targets", &targets); err != nil {
 		return fmt.Errorf("could not reach central daemon: %w", err)
 	}
-	if len(resp.Peers) == 0 {
-		fmt.Println("No Agent peers discovered.")
+	if len(targets) == 0 {
+		fmt.Println("No SD targets discovered.")
 		return nil
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "HOSTNAME\tTAILSCALE IP\tPORT\tSOURCE\tHEALTH\tSERVICES\tTAGS")
-	for _, p := range resp.Peers {
-		port := portFromURL(p.AgentURL)
-		tags := strings.Join(p.Tags, ",")
-		health := colorHealth(p.Health)
-		source := colorSource(p.Source)
-		svcCol := formatServiceCount(p)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			p.Hostname, p.TailscaleIP, port, source, health, svcCol, tags)
+	fmt.Fprintln(tw, "TARGET\tJOB\tLABELS")
+	for _, t := range targets {
+		target := strings.Join(t.Targets, ",")
+		job := t.Labels["job"]
+		// Collect labels excluding "job" for display.
+		var lbls []string
+		for k, v := range t.Labels {
+			if k == "job" {
+				continue
+			}
+			lbls = append(lbls, k+"="+v)
+		}
+		sort.Strings(lbls)
+		labelStr := strings.Join(lbls, ", ")
+		if labelStr == "" {
+			labelStr = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", target, job, labelStr)
 	}
 	return tw.Flush()
 }
@@ -153,7 +163,7 @@ func HealthCmd() *cobra.Command {
 func PeerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "peer",
-		Short: "Manage manually configured Agent peers on Central",
+		Short: "Manage and list Agent peers on Central",
 	}
 	cmd.AddCommand(peerAddCmd(), peerListCmd(), peerRemoveCmd())
 	return cmd
@@ -191,31 +201,35 @@ func peerListCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List manually configured peers",
+		Short: "List all discovered peers (auto + manual)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			applyColorFlag(useColor)
 			c := daemon.NewClient(resolveCentralSocket(socket))
-			type peerItem struct {
-				Name    string `json:"name"`
-				Address string `json:"address"`
-				Port    int    `json:"port"`
-			}
-			var items []peerItem
-			if err := c.Get("/mgmt/peer/list", &items); err != nil {
+			var resp protocol.PeersResponse
+			if err := c.Get("/peers", &resp); err != nil {
 				return fmt.Errorf("could not reach central daemon: %w", err)
 			}
-			if len(items) == 0 {
-				fmt.Println("No manual peers configured.")
+			if len(resp.Peers) == 0 {
+				fmt.Println("No peers discovered.")
 				return nil
 			}
-			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME\tADDRESS\tPORT")
-			for _, it := range items {
-				port := it.Port
-				if port == 0 {
-					port = protocol.DefaultAgentPort
+			// Sort: manual first, then auto; within same source, by hostname.
+			sort.Slice(resp.Peers, func(i, j int) bool {
+				if resp.Peers[i].Source != resp.Peers[j].Source {
+					return resp.Peers[i].Source == protocol.PeerSourceManual
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%d\n", it.Name, it.Address, port)
+				return resp.Peers[i].Hostname < resp.Peers[j].Hostname
+			})
+			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "HOSTNAME\tIP\tPORT\tSOURCE\tHEALTH\tTAGS")
+			for _, p := range resp.Peers {
+				port := portFromURL(p.AgentURL)
+				tags := strings.Join(p.Tags, ",")
+				if tags == "" {
+					tags = "-"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+					p.Hostname, p.TailscaleIP, port, colorSource(p.Source), colorHealth(p.Health), tags)
 			}
 			return tw.Flush()
 		},
@@ -260,31 +274,31 @@ func applyColorFlag(val string) {
 	}
 }
 
-// colorHealth returns a coloured string for an AgentHealth value.
+// colorHealth returns a coloured uppercase string for an AgentHealth value.
 func colorHealth(h protocol.AgentHealth) string {
 	switch h {
 	case protocol.AgentHealthOK:
-		return color.GreenString("ok")
+		return color.GreenString("OK")
 	case protocol.AgentHealthOffline:
-		return color.HiBlackString("offline")
+		return color.HiBlackString("OFFLINE")
 	case protocol.AgentHealthTimeout:
-		return color.YellowString("timeout")
+		return color.YellowString("TIMEOUT")
 	case protocol.AgentHealthUnauthorized:
-		return color.RedString("unauthorized")
+		return color.RedString("UNAUTHORIZED")
 	default:
-		return string(h)
+		return strings.ToUpper(string(h))
 	}
 }
 
-// colorSource returns a coloured string for a PeerSource value.
+// colorSource returns a coloured uppercase string for a PeerSource value.
 func colorSource(s protocol.PeerSource) string {
 	switch s {
 	case protocol.PeerSourceAuto:
-		return color.CyanString("auto")
+		return color.CyanString("AUTO")
 	case protocol.PeerSourceManual:
-		return color.MagentaString("manual")
+		return color.MagentaString("MANUAL")
 	default:
-		return string(s)
+		return strings.ToUpper(string(s))
 	}
 }
 
@@ -320,20 +334,6 @@ func printTailscaleStatus(ts *protocol.TailscaleStatus) {
 	}
 }
 
-// formatServiceCount formats the Services count for the discover table.
-// If the data is stale (peer unreachable, showing cached data) it appends
-// a "(stale X ago)" annotation coloured yellow.
-func formatServiceCount(p protocol.PeerInfo) string {
-	if p.ServicesUpdatedAt == nil {
-		return "-"
-	}
-	count := fmt.Sprintf("%d", len(p.Services))
-	if p.Health != protocol.AgentHealthOK {
-		age := time.Since(*p.ServicesUpdatedAt).Round(time.Minute)
-		return count + " " + color.YellowString("(stale %s ago)", formatDuration(age))
-	}
-	return count
-}
 
 // formatDuration formats a duration as a human-friendly short string, e.g.
 // "5m", "2h30m", "1d4h".

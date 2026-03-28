@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"tailscale.com/client/local"
 
@@ -48,16 +49,27 @@ type Server struct {
 	// ACL Tag-based auth via Tailscale nodeAttrs.
 	lc           local.Client
 	allowedCTags []string // authorized Central ACL tags from nodeAttrs; empty = disabled
+
+	// Client access tracking (in-memory only).
+	lastClients map[string]*clientAccess // keyed by IP
+}
+
+// clientAccess records the last time a client accessed the Agent.
+type clientAccess struct {
+	nodeName string
+	ip       string
+	lastSeen time.Time
 }
 
 // NewServer creates a new Agent Server from the given config.
 func NewServer(cfg config.AgentConfig) *Server {
 	s := &Server{
-		cfg:     cfg,
-		reg:     newRegistry(),
-		buckets: newBucketStore(),
-		proxies: newProxyStore(),
-		mux:     http.NewServeMux(),
+		cfg:         cfg,
+		reg:         newRegistry(),
+		buckets:     newBucketStore(),
+		proxies:     newProxyStore(),
+		mux:         http.NewServeMux(),
+		lastClients: make(map[string]*clientAccess),
 	}
 	s.hc = newHealthChecker(s.reg)
 	s.registerHandlers()
@@ -107,6 +119,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			resp, err := s.lc.WhoIs(r.Context(), r.RemoteAddr)
 			if err == nil && resp.Node != nil {
 				if tagsIntersect(resp.Node.Tags, allowedTags) {
+					s.recordClientAccess(r)
 					next(w, r) // ACL Tag match → allow
 					return
 				}
@@ -115,6 +128,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			// If no token: allow only if allow_anonymous=true.
 			if token == "" {
 				if allowAnon {
+					s.recordClientAccess(r)
 					next(w, r) // allow anonymous
 					return
 				}
@@ -132,6 +146,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// Token matches or no token + no ACL Tag configured → allow.
+		s.recordClientAccess(r)
 		next(w, r)
 	}
 }
@@ -148,6 +163,44 @@ func tagsIntersect(nodeTags []string, allowed []string) bool {
 		}
 	}
 	return false
+}
+
+// recordClientAccess records a successful client access. It resolves the
+// Tailscale node name via WhoIs when possible. The data is kept in memory only.
+func (s *Server) recordClientAccess(r *http.Request) {
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+
+	var nodeName string
+	resp, err := s.lc.WhoIs(r.Context(), r.RemoteAddr)
+	if err == nil && resp.Node != nil {
+		nodeName = resp.Node.ComputedName
+	}
+
+	s.mu.Lock()
+	s.lastClients[ip] = &clientAccess{
+		nodeName: nodeName,
+		ip:       ip,
+		lastSeen: time.Now(),
+	}
+	s.mu.Unlock()
+}
+
+// clientAccessList returns a snapshot of recent client accesses for the status API.
+func (s *Server) clientAccessList() []protocol.ClientAccessInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]protocol.ClientAccessInfo, 0, len(s.lastClients))
+	for _, ca := range s.lastClients {
+		result = append(result, protocol.ClientAccessInfo{
+			NodeName: ca.nodeName,
+			IP:       ca.ip,
+			LastSeen: ca.lastSeen,
+		})
+	}
+	return result
 }
 
 // LoadNodeAttrs reads this node's Tailscale nodeAttrs and updates:

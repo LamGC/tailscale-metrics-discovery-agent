@@ -60,12 +60,21 @@ type TailscaleStatus struct {
 	Error        string   `json:"error,omitempty"`         // set when Tailscale is unreachable
 }
 
+// ClientAccessInfo records the last time a client (typically Central)
+// accessed this Agent.
+type ClientAccessInfo struct {
+	NodeName string    `json:"node_name,omitempty"` // Tailscale node name, if resolvable
+	IP       string    `json:"ip"`
+	LastSeen time.Time `json:"last_seen"`
+}
+
 // StatusResponse is the common management API status payload.
 type StatusResponse struct {
-	Running   bool             `json:"running"`
-	Version   string           `json:"version,omitempty"`
-	Info      string           `json:"info,omitempty"`
-	Tailscale *TailscaleStatus `json:"tailscale,omitempty"`
+	Running   bool               `json:"running"`
+	Version   string             `json:"version,omitempty"`
+	Info      string             `json:"info,omitempty"`
+	Tailscale *TailscaleStatus   `json:"tailscale,omitempty"`
+	Clients   []ClientAccessInfo `json:"clients,omitempty"` // Agent only: recent client accesses
 }
 
 // PeerSource indicates how a peer was added to Central's peer set.

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -340,6 +341,47 @@ func printAgentTailscaleStatus(ts *protocol.TailscaleStatus) {
 	for _, tag := range ts.Tags {
 		fmt.Fprintf(os.Stdout, "  Tag:     %s\n", tag)
 	}
+}
+
+// printClientAccess prints client access information from the Agent status.
+func printClientAccess(clients []protocol.ClientAccessInfo) {
+	if len(clients) == 0 {
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	fmt.Fprintln(os.Stdout, "Recent clients:")
+	for _, c := range clients {
+		age := time.Since(c.LastSeen).Round(time.Second)
+		if c.NodeName != "" {
+			fmt.Fprintf(os.Stdout, "  %s (%s)  last seen %s ago\n", c.NodeName, c.IP, formatAge(age))
+		} else {
+			fmt.Fprintf(os.Stdout, "  %s  last seen %s ago\n", c.IP, formatAge(age))
+		}
+	}
+}
+
+// formatAge formats a duration as a human-friendly short string.
+func formatAge(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	hours := int(d.Hours())
+	days := hours / 24
+	if days > 0 {
+		h := hours % 24
+		if h > 0 {
+			return fmt.Sprintf("%dd%dh", days, h)
+		}
+		return fmt.Sprintf("%dd", days)
+	}
+	m := int(d.Minutes()) % 60
+	if m > 0 {
+		return fmt.Sprintf("%dh%dm", hours, m)
+	}
+	return fmt.Sprintf("%dh", hours)
 }
 
 // --- helpers ---
