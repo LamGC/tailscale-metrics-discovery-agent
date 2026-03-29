@@ -96,7 +96,7 @@ func DefaultCentralConfig() CentralConfig {
 		Discovery: DiscoveryConfig{
 			Tags:            []string{"tag:prometheus-agent"},
 			AgentPort:       9001,
-			RefreshInterval: Duration{60 * time.Second},
+			RefreshInterval: Duration{5 * time.Second},
 			NodeAttrs:       true,
 		},
 		Management: CentralManagement{

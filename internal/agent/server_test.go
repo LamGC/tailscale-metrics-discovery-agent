@@ -232,6 +232,130 @@ func TestHandleProxyMetrics_OK(t *testing.T) {
 	}
 }
 
+func TestHandleServices_LastModified(t *testing.T) {
+	s := newTestServer(config.AgentConfig{})
+	_ = s.addStatic("svc1", []string{"host:9100"}, nil, nil)
+
+	w := httptest.NewRecorder()
+	s.handleServices(w, httptest.NewRequest(http.MethodGet, "/api/v1/services", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	lm := w.Header().Get("Last-Modified")
+	if lm == "" {
+		t.Fatal("missing Last-Modified header")
+	}
+
+	// Second request with If-Modified-Since should get 304.
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest(http.MethodGet, "/api/v1/services", nil)
+	r2.Header.Set("If-Modified-Since", lm)
+	s.handleServices(w2, r2)
+
+	if w2.Code != http.StatusNotModified {
+		t.Errorf("status = %d, want 304", w2.Code)
+	}
+	if w2.Body.Len() != 0 {
+		t.Errorf("304 response should have empty body, got %d bytes", w2.Body.Len())
+	}
+}
+
+func TestHandleServices_NoHealthField(t *testing.T) {
+	s := newTestServer(config.AgentConfig{})
+	_ = s.addStatic("svc1", []string{"host:9100"}, nil, nil)
+	// Set health on the service.
+	s.reg.updateHealth("svc1", protocol.ServiceHealthStatus{Status: protocol.ServiceHealthHealthy})
+
+	w := httptest.NewRecorder()
+	s.handleServices(w, httptest.NewRequest(http.MethodGet, "/api/v1/services", nil))
+
+	var entries []protocol.ServiceEntry
+	if err := json.Unmarshal(w.Body.Bytes(), &entries); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len = %d, want 1", len(entries))
+	}
+	if entries[0].Health != nil {
+		t.Errorf("/api/v1/services should not include health, got %+v", entries[0].Health)
+	}
+}
+
+func TestHandleServicesHealth_OK(t *testing.T) {
+	s := newTestServer(config.AgentConfig{})
+	_ = s.addStatic("svc1", []string{"host:9100"}, nil, nil)
+	s.reg.updateHealth("svc1", protocol.ServiceHealthStatus{Status: protocol.ServiceHealthHealthy, StatusCode: 200})
+
+	w := httptest.NewRecorder()
+	s.handleServicesHealth(w, httptest.NewRequest(http.MethodGet, "/api/v1/services/health", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	lm := w.Header().Get("Last-Modified")
+	if lm == "" {
+		t.Fatal("missing Last-Modified header")
+	}
+
+	var hm map[string]*protocol.ServiceHealthStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &hm); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if hm["svc1"] == nil || hm["svc1"].Status != protocol.ServiceHealthHealthy {
+		t.Errorf("svc1 health = %v, want healthy", hm["svc1"])
+	}
+}
+
+func TestHandleServicesHealth_304(t *testing.T) {
+	s := newTestServer(config.AgentConfig{})
+	_ = s.addStatic("svc1", []string{"host:9100"}, nil, nil)
+	s.reg.updateHealth("svc1", protocol.ServiceHealthStatus{Status: protocol.ServiceHealthHealthy})
+
+	// First request to get Last-Modified.
+	w := httptest.NewRecorder()
+	s.handleServicesHealth(w, httptest.NewRequest(http.MethodGet, "/api/v1/services/health", nil))
+	lm := w.Header().Get("Last-Modified")
+
+	// Second with If-Modified-Since.
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest(http.MethodGet, "/api/v1/services/health", nil)
+	r2.Header.Set("If-Modified-Since", lm)
+	s.handleServicesHealth(w2, r2)
+
+	if w2.Code != http.StatusNotModified {
+		t.Errorf("status = %d, want 304", w2.Code)
+	}
+}
+
+func TestHandleServicesHealth_EmptyMap(t *testing.T) {
+	s := newTestServer(config.AgentConfig{})
+	_ = s.addStatic("svc1", []string{"host:9100"}, nil, nil) // no health check
+
+	w := httptest.NewRecorder()
+	s.handleServicesHealth(w, httptest.NewRequest(http.MethodGet, "/api/v1/services/health", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var hm map[string]*protocol.ServiceHealthStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &hm); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(hm) != 0 {
+		t.Errorf("expected empty health map, got %v", hm)
+	}
+}
+
+func TestHandleServicesHealth_MethodNotAllowed(t *testing.T) {
+	s := newTestServer(config.AgentConfig{})
+	w := httptest.NewRecorder()
+	s.handleServicesHealth(w, httptest.NewRequest(http.MethodPost, "/api/v1/services/health", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", w.Code)
+	}
+}
+
 func TestFilterSlice(t *testing.T) {
 	in := []int{1, 2, 3, 4, 5}
 	out := filterSlice(in, func(v int) bool { return v%2 == 0 })

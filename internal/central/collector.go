@@ -2,14 +2,18 @@ package central
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sync"
 	"time"
+
+	"golang.org/x/net/http2"
 
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
@@ -65,15 +69,29 @@ type collector struct {
 	manualPeers map[string]manualPeer // keyed by Tailscale IP / address
 
 	saveMu sync.Mutex // serialises concurrent savePeerCache() calls
+
+	// Per-peer Last-Modified tracking for conditional requests (If-Modified-Since).
+	condMu             sync.RWMutex
+	lastModifiedSvc    map[string]string // key=TailscaleIP, value=Last-Modified header
+	lastModifiedHealth map[string]string
 }
 
 func newCollector(d *discoverer, agentToken string) *collector {
+	h2t := &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		},
+	}
 	return &collector{
-		discoverer:   d,
-		agentToken:   agentToken,
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
-		serviceCache: make(map[string]cachedPeerServices),
-		manualPeers:  make(map[string]manualPeer),
+		discoverer:         d,
+		agentToken:         agentToken,
+		httpClient:         &http.Client{Timeout: 10 * time.Second, Transport: h2t},
+		serviceCache:       make(map[string]cachedPeerServices),
+		manualPeers:        make(map[string]manualPeer),
+		lastModifiedSvc:    make(map[string]string),
+		lastModifiedHealth: make(map[string]string),
 	}
 }
 
@@ -291,10 +309,13 @@ func (c *collector) ListManualPeers() []manualPeer {
 
 // peerResult is the per-goroutine result from querying one Agent.
 type peerResult struct {
-	idx      int
-	services []protocol.ServiceEntry
-	targets  []protocol.SDTarget
-	health   protocol.AgentHealth
+	idx       int
+	services  []protocol.ServiceEntry                 // nil on 304
+	targets   []protocol.SDTarget                     // nil on 304
+	healthMap map[string]*protocol.ServiceHealthStatus // nil on 304 or old agent
+	health    protocol.AgentHealth                     // worst of svc + health queries
+	svc304    bool
+	health304 bool
 }
 
 // refresh re-discovers peers, applies manual overrides, queries each online
@@ -334,6 +355,10 @@ func (c *collector) refresh(ctx context.Context) {
 	c.cacheMu.RUnlock()
 
 	// Query each peer that Tailscale reports as online (or manually added).
+	// For each peer, two requests are made in parallel via H2 multiplexing:
+	//   GET /api/v1/services        — service list (without health)
+	//   GET /api/v1/services/health — health status map
+	// Both support If-Modified-Since / 304 Not Modified.
 	resultCh := make(chan peerResult, len(peers))
 	var wg sync.WaitGroup
 	for i, peer := range peers {
@@ -344,11 +369,42 @@ func (c *collector) refresh(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			services, targets, health, qErr := c.queryAgent(ctx, peer)
-			if qErr != nil {
-				log.Printf("central: agent %s (%s): %v", peer.Hostname, peer.TailscaleIP, qErr)
-			}
-			resultCh <- peerResult{idx: i, services: services, targets: targets, health: health}
+			var pr peerResult
+			pr.idx = i
+
+			var swg sync.WaitGroup
+			swg.Add(2)
+
+			// Query services.
+			var svcHealth protocol.AgentHealth
+			go func() {
+				defer swg.Done()
+				svcs, tgts, h, notMod, qErr := c.queryAgentServices(ctx, peer)
+				if qErr != nil {
+					log.Printf("central: agent %s (%s) services: %v", peer.Hostname, peer.TailscaleIP, qErr)
+				}
+				pr.services = svcs
+				pr.targets = tgts
+				pr.svc304 = notMod
+				svcHealth = h
+			}()
+
+			// Query health.
+			var hlthHealth protocol.AgentHealth
+			go func() {
+				defer swg.Done()
+				hm, h, notMod, qErr := c.queryAgentHealth(ctx, peer)
+				if qErr != nil {
+					log.Printf("central: agent %s (%s) health: %v", peer.Hostname, peer.TailscaleIP, qErr)
+				}
+				pr.healthMap = hm
+				pr.health304 = notMod
+				hlthHealth = h
+			}()
+
+			swg.Wait()
+			pr.health = worseHealth(svcHealth, hlthHealth)
+			resultCh <- pr
 		}()
 	}
 	wg.Wait()
@@ -361,14 +417,39 @@ func (c *collector) refresh(ctx context.Context) {
 		peers[r.idx].Health = r.health
 		ip := peers[r.idx].TailscaleIP
 		if r.health == protocol.AgentHealthOK {
-			// Freshen the cache.
+			// 1. Get base services: from response or from cache on 304.
+			var services []protocol.ServiceEntry
+			if r.svc304 {
+				c.cacheMu.RLock()
+				if cached, ok := c.serviceCache[ip]; ok {
+					services = cached.services
+				}
+				c.cacheMu.RUnlock()
+			} else {
+				services = r.services
+			}
+
+			// 2. Merge health: on 200, overlay fresh health onto services.
+			//    On 304, cached services already have the previously merged health.
+			if !r.health304 && r.healthMap != nil {
+				for i := range services {
+					if h, ok := r.healthMap[services[i].Name]; ok {
+						services[i].Health = h
+					}
+				}
+			}
+
+			// 3. Update cache with merged result.
 			c.cacheMu.Lock()
-			c.serviceCache[ip] = cachedPeerServices{services: r.services, fetchedAt: now}
+			c.serviceCache[ip] = cachedPeerServices{services: services, fetchedAt: now}
 			c.cacheMu.Unlock()
+
 			t := now
-			peers[r.idx].Services = r.services
+			peers[r.idx].Services = services
 			peers[r.idx].ServicesUpdatedAt = &t
-			allTargets = append(allTargets, r.targets...)
+			for _, svc := range services {
+				allTargets = append(allTargets, svc.Target)
+			}
 		} else {
 			// Restore from cache if still within TTL.
 			c.cacheMu.RLock()
@@ -404,9 +485,9 @@ func (c *collector) refresh(ctx context.Context) {
 	go c.savePeerCache()
 }
 
-// queryAgent fetches the service list from a single Agent.
-// Returns service entries, the extracted SD targets, the resulting AgentHealth, and any error.
-func (c *collector) queryAgent(ctx context.Context, peer protocol.PeerInfo) ([]protocol.ServiceEntry, []protocol.SDTarget, protocol.AgentHealth, error) {
+// queryAgentServices fetches the service list (without health) from a single Agent.
+// Returns (entries, targets, health, notModified, error).
+func (c *collector) queryAgentServices(ctx context.Context, peer protocol.PeerInfo) ([]protocol.ServiceEntry, []protocol.SDTarget, protocol.AgentHealth, bool, error) {
 	c.mu.RLock()
 	token := c.agentToken
 	c.mu.RUnlock()
@@ -414,39 +495,131 @@ func (c *collector) queryAgent(ctx context.Context, peer protocol.PeerInfo) ([]p
 	url := peer.AgentURL + "/api/v1/services"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, nil, protocol.AgentHealthTimeout, fmt.Errorf("build request: %w", err)
+		return nil, nil, protocol.AgentHealthTimeout, false, fmt.Errorf("build request: %w", err)
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
+	// Conditional request: send If-Modified-Since if we have a stored value.
+	c.condMu.RLock()
+	if lm, ok := c.lastModifiedSvc[peer.TailscaleIP]; ok {
+		req.Header.Set("If-Modified-Since", lm)
+	}
+	c.condMu.RUnlock()
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || isTimeoutError(err) {
-			return nil, nil, protocol.AgentHealthTimeout, fmt.Errorf("timeout reaching agent: %w", err)
+			return nil, nil, protocol.AgentHealthTimeout, false, fmt.Errorf("timeout reaching agent: %w", err)
 		}
-		return nil, nil, protocol.AgentHealthTimeout, fmt.Errorf("connect to agent: %w", err)
+		return nil, nil, protocol.AgentHealthTimeout, false, fmt.Errorf("connect to agent: %w", err)
 	}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
+	case http.StatusNotModified:
+		return nil, nil, protocol.AgentHealthOK, true, nil
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return nil, nil, protocol.AgentHealthUnauthorized, fmt.Errorf("agent returned HTTP %d (token mismatch?)", resp.StatusCode)
+		return nil, nil, protocol.AgentHealthUnauthorized, false, fmt.Errorf("agent returned HTTP %d (token mismatch?)", resp.StatusCode)
 	case http.StatusOK:
 		// fall through
 	default:
-		return nil, nil, protocol.AgentHealthTimeout, fmt.Errorf("agent returned HTTP %d", resp.StatusCode)
+		return nil, nil, protocol.AgentHealthTimeout, false, fmt.Errorf("agent returned HTTP %d", resp.StatusCode)
+	}
+
+	// Store Last-Modified for future conditional requests.
+	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+		c.condMu.Lock()
+		c.lastModifiedSvc[peer.TailscaleIP] = lm
+		c.condMu.Unlock()
 	}
 
 	var entries []protocol.ServiceEntry
 	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
-		return nil, nil, protocol.AgentHealthTimeout, fmt.Errorf("decode agent response: %w", err)
+		return nil, nil, protocol.AgentHealthTimeout, false, fmt.Errorf("decode agent response: %w", err)
 	}
 	targets := make([]protocol.SDTarget, 0, len(entries))
 	for _, e := range entries {
 		targets = append(targets, e.Target)
 	}
-	return entries, targets, protocol.AgentHealthOK, nil
+	return entries, targets, protocol.AgentHealthOK, false, nil
+}
+
+// queryAgentHealth fetches the health map from a single Agent.
+// Returns (healthMap, health, notModified, error).
+func (c *collector) queryAgentHealth(ctx context.Context, peer protocol.PeerInfo) (map[string]*protocol.ServiceHealthStatus, protocol.AgentHealth, bool, error) {
+	c.mu.RLock()
+	token := c.agentToken
+	c.mu.RUnlock()
+
+	url := peer.AgentURL + "/api/v1/services/health"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, protocol.AgentHealthTimeout, false, fmt.Errorf("build request: %w", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	// Conditional request.
+	c.condMu.RLock()
+	if lm, ok := c.lastModifiedHealth[peer.TailscaleIP]; ok {
+		req.Header.Set("If-Modified-Since", lm)
+	}
+	c.condMu.RUnlock()
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || isTimeoutError(err) {
+			return nil, protocol.AgentHealthTimeout, false, fmt.Errorf("timeout reaching agent: %w", err)
+		}
+		return nil, protocol.AgentHealthTimeout, false, fmt.Errorf("connect to agent: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		return nil, protocol.AgentHealthOK, true, nil
+	case http.StatusNotFound:
+		// Old Agent without /services/health endpoint — not an error.
+		return nil, protocol.AgentHealthOK, false, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return nil, protocol.AgentHealthUnauthorized, false, fmt.Errorf("agent returned HTTP %d (token mismatch?)", resp.StatusCode)
+	case http.StatusOK:
+		// fall through
+	default:
+		return nil, protocol.AgentHealthTimeout, false, fmt.Errorf("agent returned HTTP %d", resp.StatusCode)
+	}
+
+	// Store Last-Modified for future conditional requests.
+	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+		c.condMu.Lock()
+		c.lastModifiedHealth[peer.TailscaleIP] = lm
+		c.condMu.Unlock()
+	}
+
+	var healthMap map[string]*protocol.ServiceHealthStatus
+	if err := json.NewDecoder(resp.Body).Decode(&healthMap); err != nil {
+		return nil, protocol.AgentHealthTimeout, false, fmt.Errorf("decode agent health response: %w", err)
+	}
+	return healthMap, protocol.AgentHealthOK, false, nil
+}
+
+// worseHealth returns the worse of two AgentHealth values.
+// Ordering: OK < Unknown < Timeout < Unauthorized < Offline.
+func worseHealth(a, b protocol.AgentHealth) protocol.AgentHealth {
+	rank := map[protocol.AgentHealth]int{
+		protocol.AgentHealthOK:           0,
+		protocol.AgentHealthUnknown:      1,
+		protocol.AgentHealthTimeout:      2,
+		protocol.AgentHealthUnauthorized: 3,
+		protocol.AgentHealthOffline:      4,
+	}
+	if rank[b] > rank[a] {
+		return b
+	}
+	return a
 }
 
 // mergePeers combines auto-discovered peers with manually configured peers.

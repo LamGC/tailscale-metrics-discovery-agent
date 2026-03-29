@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"tailscale.com/client/local"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -81,6 +83,7 @@ func NewServer(cfg config.AgentConfig) *Server {
 func (s *Server) registerHandlers() {
 	s.mux.HandleFunc("/healthz", handleHealthz)
 	s.mux.HandleFunc("/api/v1/services", s.authMiddleware(s.handleServices))
+	s.mux.HandleFunc("/api/v1/services/health", s.authMiddleware(s.handleServicesHealth))
 	s.mux.HandleFunc("/push/", s.authMiddleware(s.handlePush))
 	s.mux.HandleFunc("/bucket/", s.handleBucketMetrics)
 	s.mux.HandleFunc("/proxy/", s.handleProxyMetrics)
@@ -326,9 +329,10 @@ func (s *Server) Start() error {
 	}
 	s.setupMetrics()
 
+	h2s := &http2.Server{}
 	s.httpSrv = &http.Server{
 		Addr:    s.cfg.Server.Listen,
-		Handler: s.mux,
+		Handler: h2c.NewHandler(s.mux, h2s),
 	}
 
 	errCh := make(chan error, 3)
@@ -429,7 +433,15 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	entries := s.reg.list()
+
+	// Check conditional request before doing any work.
+	modTime := s.reg.SvcLastModified()
+	if checkNotModified(r, modTime) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	entries := s.reg.listWithoutHealth()
 
 	// Build resolve context for this request.
 	s.mu.RLock()
@@ -462,10 +474,46 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	w.Header().Set("Last-Modified", modTime.UTC().Format(http.TimeFormat))
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resolved); err != nil {
 		log.Printf("agent: failed to encode services: %v", err)
 	}
+}
+
+func (s *Server) handleServicesHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	modTime := s.reg.HealthLastModified()
+	if checkNotModified(r, modTime) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	health := s.reg.listHealth()
+	w.Header().Set("Last-Modified", modTime.UTC().Format(http.TimeFormat))
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(health); err != nil {
+		log.Printf("agent: failed to encode services health: %v", err)
+	}
+}
+
+// checkNotModified returns true if the request's If-Modified-Since header
+// indicates the client already has the latest data.
+func checkNotModified(r *http.Request, modTime time.Time) bool {
+	ims := r.Header.Get("If-Modified-Since")
+	if ims == "" {
+		return false
+	}
+	t, err := http.ParseTime(ims)
+	if err != nil {
+		return false
+	}
+	// HTTP dates have second precision; truncate for comparison.
+	return !modTime.Truncate(time.Second).After(t.Truncate(time.Second))
 }
 
 // resolveEntry resolves all target variables in a ServiceEntry.

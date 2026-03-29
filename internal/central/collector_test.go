@@ -35,9 +35,12 @@ func mockResponse(statusCode int, body string) *http.Response {
 
 // newTestCollector returns a collector without a real discoverer,
 // suitable for unit tests that call methods directly.
+// It uses a default HTTP/1.1 transport for compatibility with httptest.Server.
 func newTestCollector() *collector {
 	d := &discoverer{port: 9001}
-	return newCollector(d, "")
+	c := newCollector(d, "")
+	c.httpClient = &http.Client{Timeout: 10 * time.Second} // HTTP/1.1 for tests
+	return c
 }
 
 // --- mergePeers ---
@@ -85,9 +88,9 @@ func TestMergePeers_ManualOnly(t *testing.T) {
 	}
 }
 
-// --- queryAgent ---
+// --- queryAgentServices ---
 
-func TestQueryAgent_OK(t *testing.T) {
+func TestQueryAgentServices_OK(t *testing.T) {
 	entries := []protocol.ServiceEntry{
 		{Name: "svc1", Type: protocol.ServiceTypeStatic, Target: protocol.SDTarget{Targets: []string{"host:9100"}}},
 	}
@@ -95,6 +98,7 @@ func TestQueryAgent_OK(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
 	}))
@@ -108,9 +112,12 @@ func TestQueryAgent_OK(t *testing.T) {
 		Health:      protocol.AgentHealthUnknown,
 	}
 
-	svcList, targets, health, err := c.queryAgent(context.Background(), peer)
+	svcList, targets, health, notMod, err := c.queryAgentServices(context.Background(), peer)
 	if err != nil {
-		t.Fatalf("queryAgent error: %v", err)
+		t.Fatalf("queryAgentServices error: %v", err)
+	}
+	if notMod {
+		t.Error("expected notModified=false on first request")
 	}
 	if health != protocol.AgentHealthOK {
 		t.Errorf("health = %q, want ok", health)
@@ -123,7 +130,53 @@ func TestQueryAgent_OK(t *testing.T) {
 	}
 }
 
-func TestQueryAgent_Unauthorized(t *testing.T) {
+func TestQueryAgentServices_304(t *testing.T) {
+	lm := time.Now().UTC().Format(http.TimeFormat)
+	callCount := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			// First request: return full response with Last-Modified.
+			entries := []protocol.ServiceEntry{
+				{Name: "svc1", Target: protocol.SDTarget{Targets: []string{"host:9100"}}},
+			}
+			body, _ := json.Marshal(entries)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Last-Modified", lm)
+			_, _ = w.Write(body)
+			return
+		}
+		// Second request: check If-Modified-Since and return 304.
+		if ims := r.Header.Get("If-Modified-Since"); ims != "" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	c := newTestCollector()
+	peer := protocol.PeerInfo{TailscaleIP: "127.0.0.1", AgentURL: srv.URL}
+
+	// First call: should get data.
+	_, _, _, notMod, _ := c.queryAgentServices(context.Background(), peer)
+	if notMod {
+		t.Error("first call should not be 304")
+	}
+
+	// Second call: should get 304.
+	_, _, health, notMod, _ := c.queryAgentServices(context.Background(), peer)
+	if !notMod {
+		t.Error("second call should be 304")
+	}
+	if health != protocol.AgentHealthOK {
+		t.Errorf("304 should return AgentHealthOK, got %q", health)
+	}
+}
+
+func TestQueryAgentServices_Unauthorized(t *testing.T) {
 	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "denied", code)
@@ -131,7 +184,7 @@ func TestQueryAgent_Unauthorized(t *testing.T) {
 
 		c := newTestCollector()
 		peer := protocol.PeerInfo{AgentURL: srv.URL}
-		_, _, health, _ := c.queryAgent(context.Background(), peer)
+		_, _, health, _, _ := c.queryAgentServices(context.Background(), peer)
 		srv.Close()
 
 		if health != protocol.AgentHealthUnauthorized {
@@ -140,7 +193,7 @@ func TestQueryAgent_Unauthorized(t *testing.T) {
 	}
 }
 
-func TestQueryAgent_BadJSON(t *testing.T) {
+func TestQueryAgentServices_BadJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("not json"))
@@ -149,7 +202,7 @@ func TestQueryAgent_BadJSON(t *testing.T) {
 
 	c := newTestCollector()
 	peer := protocol.PeerInfo{AgentURL: srv.URL}
-	_, _, health, err := c.queryAgent(context.Background(), peer)
+	_, _, health, _, err := c.queryAgentServices(context.Background(), peer)
 
 	if health != protocol.AgentHealthTimeout {
 		t.Errorf("health = %q, want timeout", health)
@@ -159,7 +212,7 @@ func TestQueryAgent_BadJSON(t *testing.T) {
 	}
 }
 
-func TestQueryAgent_BearerToken(t *testing.T) {
+func TestQueryAgentServices_BearerToken(t *testing.T) {
 	var capturedAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedAuth = r.Header.Get("Authorization")
@@ -171,19 +224,129 @@ func TestQueryAgent_BearerToken(t *testing.T) {
 	c := newTestCollector()
 	c.agentToken = "secret-token"
 	peer := protocol.PeerInfo{AgentURL: srv.URL}
-	c.queryAgent(context.Background(), peer)
+	c.queryAgentServices(context.Background(), peer)
 
 	if capturedAuth != "Bearer secret-token" {
 		t.Errorf("Authorization = %q, want Bearer secret-token", capturedAuth)
 	}
 }
 
-func TestQueryAgent_ConnectError(t *testing.T) {
+func TestQueryAgentServices_ConnectError(t *testing.T) {
 	c := newTestCollector()
 	peer := protocol.PeerInfo{AgentURL: "http://127.0.0.1:1"} // port 1 will be refused
-	_, _, health, _ := c.queryAgent(context.Background(), peer)
+	_, _, health, _, _ := c.queryAgentServices(context.Background(), peer)
 	if health != protocol.AgentHealthTimeout {
 		t.Errorf("health = %q, want timeout on connect error", health)
+	}
+}
+
+// --- queryAgentHealth ---
+
+func TestQueryAgentHealth_OK(t *testing.T) {
+	healthMap := map[string]*protocol.ServiceHealthStatus{
+		"svc1": {Status: protocol.ServiceHealthHealthy, StatusCode: 200},
+	}
+	body, _ := json.Marshal(healthMap)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	c := newTestCollector()
+	peer := protocol.PeerInfo{TailscaleIP: "127.0.0.1", AgentURL: srv.URL}
+
+	hm, health, notMod, err := c.queryAgentHealth(context.Background(), peer)
+	if err != nil {
+		t.Fatalf("queryAgentHealth error: %v", err)
+	}
+	if notMod {
+		t.Error("expected notModified=false on first request")
+	}
+	if health != protocol.AgentHealthOK {
+		t.Errorf("health = %q, want ok", health)
+	}
+	if len(hm) != 1 {
+		t.Errorf("healthMap len = %d, want 1", len(hm))
+	}
+	if hm["svc1"].Status != protocol.ServiceHealthHealthy {
+		t.Errorf("svc1 status = %q, want healthy", hm["svc1"].Status)
+	}
+}
+
+func TestQueryAgentHealth_304(t *testing.T) {
+	lm := time.Now().UTC().Format(http.TimeFormat)
+	callCount := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.Header().Set("Last-Modified", lm)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("{}"))
+			return
+		}
+		if ims := r.Header.Get("If-Modified-Since"); ims != "" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+
+	c := newTestCollector()
+	peer := protocol.PeerInfo{TailscaleIP: "127.0.0.1", AgentURL: srv.URL}
+
+	c.queryAgentHealth(context.Background(), peer)
+	_, health, notMod, _ := c.queryAgentHealth(context.Background(), peer)
+	if !notMod {
+		t.Error("second call should be 304")
+	}
+	if health != protocol.AgentHealthOK {
+		t.Errorf("304 should return AgentHealthOK, got %q", health)
+	}
+}
+
+func TestQueryAgentHealth_404_OldAgent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := newTestCollector()
+	peer := protocol.PeerInfo{AgentURL: srv.URL}
+	hm, health, _, err := c.queryAgentHealth(context.Background(), peer)
+
+	if err != nil {
+		t.Errorf("expected no error for 404, got %v", err)
+	}
+	if health != protocol.AgentHealthOK {
+		t.Errorf("health = %q, want ok (graceful 404)", health)
+	}
+	if hm != nil {
+		t.Errorf("healthMap should be nil for 404, got %v", hm)
+	}
+}
+
+// --- worseHealth ---
+
+func TestWorseHealth(t *testing.T) {
+	tests := []struct {
+		a, b protocol.AgentHealth
+		want protocol.AgentHealth
+	}{
+		{protocol.AgentHealthOK, protocol.AgentHealthOK, protocol.AgentHealthOK},
+		{protocol.AgentHealthOK, protocol.AgentHealthTimeout, protocol.AgentHealthTimeout},
+		{protocol.AgentHealthUnauthorized, protocol.AgentHealthOK, protocol.AgentHealthUnauthorized},
+		{protocol.AgentHealthTimeout, protocol.AgentHealthUnauthorized, protocol.AgentHealthUnauthorized},
+	}
+	for _, tt := range tests {
+		got := worseHealth(tt.a, tt.b)
+		if got != tt.want {
+			t.Errorf("worseHealth(%q, %q) = %q, want %q", tt.a, tt.b, got, tt.want)
+		}
 	}
 }
 

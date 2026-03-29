@@ -7,15 +7,18 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
 )
 
 // newIntegrationCollector builds a collector that uses no real discoverer
 // and queries peers via its httpClient directly.
+// Uses HTTP/1.1 transport for compatibility with httptest.Server.
 func newIntegrationCollector(token string) *collector {
 	d := &discoverer{port: 9001}
 	c := newCollector(d, token)
+	c.httpClient = &http.Client{Timeout: 10 * time.Second} // HTTP/1.1 for tests
 	return c
 }
 
@@ -26,8 +29,8 @@ func seedPeers(c *collector, peers []protocol.PeerInfo) {
 	c.mu.Unlock()
 }
 
-// TestIntegration_CollectorQueriesAgents verifies that refresh() (via
-// queryAgent) fetches services from mock agents and populates Targets().
+// TestIntegration_CollectorQueriesAgents verifies that queryAgentServices
+// fetches services from mock agents and populates targets.
 func TestIntegration_CollectorQueriesAgents(t *testing.T) {
 	// Build two mock agent HTTP servers.
 	makeAgentSrv := func(name string) *httptest.Server {
@@ -60,12 +63,12 @@ func TestIntegration_CollectorQueriesAgents(t *testing.T) {
 		{TailscaleIP: "100.1.1.1", Hostname: "node1", AgentURL: srv1.URL, Source: protocol.PeerSourceAuto},
 		{TailscaleIP: "100.1.1.2", Hostname: "node2", AgentURL: srv2.URL, Source: protocol.PeerSourceAuto},
 	}
-	// Call queryAgent directly for each peer and aggregate.
+	// Call queryAgentServices directly for each peer and aggregate.
 	var allTargets []protocol.SDTarget
 	for _, peer := range peers {
-		_, targets, health, err := c.queryAgent(context.Background(), peer)
+		_, targets, health, _, err := c.queryAgentServices(context.Background(), peer)
 		if err != nil {
-			t.Fatalf("queryAgent(%s): %v", peer.Hostname, err)
+			t.Fatalf("queryAgentServices(%s): %v", peer.Hostname, err)
 		}
 		if health != protocol.AgentHealthOK {
 			t.Errorf("peer %s: health = %q, want ok", peer.Hostname, health)
@@ -104,11 +107,11 @@ func TestIntegration_AgentUnreachable_CacheServed(t *testing.T) {
 	c := newIntegrationCollector("")
 	peer := protocol.PeerInfo{TailscaleIP: "100.2.2.2", Hostname: "node3", AgentURL: srv.URL}
 
-	_, _, health, err := c.queryAgent(context.Background(), peer)
+	_, _, health, _, err := c.queryAgentServices(context.Background(), peer)
 	if err != nil || health != protocol.AgentHealthOK {
 		t.Fatalf("initial query failed: health=%q err=%v", health, err)
 	}
-	// Seed the service cache manually (queryAgent doesn't update it — refresh does).
+	// Seed the service cache manually (queryAgentServices doesn't update it — refresh does).
 	c.cacheMu.Lock()
 	c.serviceCache[peer.TailscaleIP] = cachedPeerServices{
 		services: entries,
@@ -118,7 +121,7 @@ func TestIntegration_AgentUnreachable_CacheServed(t *testing.T) {
 	srv.Close() // Take the agent offline.
 
 	// Query again — should fail with timeout/connect error.
-	_, _, health2, _ := c.queryAgent(context.Background(), peer)
+	_, _, health2, _, _ := c.queryAgentServices(context.Background(), peer)
 	if health2 == protocol.AgentHealthOK {
 		t.Error("expected non-OK health when agent is down")
 	}
@@ -149,7 +152,7 @@ func TestIntegration_AuthMismatch(t *testing.T) {
 
 	c := newIntegrationCollector("wrong-token")
 	peer := protocol.PeerInfo{AgentURL: srv.URL}
-	_, _, health, _ := c.queryAgent(context.Background(), peer)
+	_, _, health, _, _ := c.queryAgentServices(context.Background(), peer)
 
 	if health != protocol.AgentHealthUnauthorized {
 		t.Errorf("health = %q, want unauthorized", health)
@@ -170,10 +173,10 @@ func TestIntegration_CorrectToken(t *testing.T) {
 
 	c := newIntegrationCollector("mytoken")
 	peer := protocol.PeerInfo{AgentURL: srv.URL}
-	_, _, health, err := c.queryAgent(context.Background(), peer)
+	_, _, health, _, err := c.queryAgentServices(context.Background(), peer)
 
 	if err != nil {
-		t.Fatalf("queryAgent: %v", err)
+		t.Fatalf("queryAgentServices: %v", err)
 	}
 	if health != protocol.AgentHealthOK {
 		t.Errorf("health = %q, want ok", health)
