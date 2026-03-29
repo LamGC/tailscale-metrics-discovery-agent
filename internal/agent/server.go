@@ -43,7 +43,9 @@ type Server struct {
 	httpSrv      *http.Server
 	mgmtSrv      *http.Server
 	metricsSrv   *http.Server        // optional dedicated metrics listener
-	selfAddr     string              // host:port announced in SDTargets for dynamic services
+	selfAddr     string              // host:port announced in SDTargets for dynamic services (v4 preferred)
+	tsIPv4       string              // Tailscale IPv4 (e.g. "100.64.0.1")
+	tsIPv6       string              // Tailscale IPv6 (e.g. "fd7a:115c:a1e0::1")
 	extraTargets []protocol.SDTarget // appended to /api/v1/services when register_self=true
 
 	// ACL Tag-based auth via Tailscale nodeAttrs.
@@ -420,15 +422,6 @@ func (s *Server) loadProxies() error {
 	return nil
 }
 
-// selfHost returns the host (without port) from the listen address.
-// It is used to build SDTarget URLs for dynamic services.
-func (s *Server) selfHost() string {
-	if s.selfAddr != "" {
-		return s.selfAddr
-	}
-	return s.cfg.Server.Listen
-}
-
 // --- /api/v1/services ---
 
 func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
@@ -437,9 +430,6 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entries := s.reg.list()
-	if entries == nil {
-		entries = []protocol.ServiceEntry{}
-	}
 	// Append self-metrics targets as static entries (no health check).
 	for _, t := range s.extraTargets {
 		entries = append(entries, protocol.ServiceEntry{
@@ -448,10 +438,50 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 			Target: t,
 		})
 	}
+
+	// Build resolve context for this request.
+	s.mu.RLock()
+	rc := &resolveContext{
+		tsIPv4: s.tsIPv4,
+		tsIPv6: s.tsIPv6,
+	}
+	listenAddr := s.cfg.Server.Listen
+	s.mu.RUnlock()
+
+	_, listenPort, _ := splitHostPort(listenAddr)
+	rc.selfAddr = selfAddrForRequest(r.RemoteAddr, rc.tsIPv4, rc.tsIPv6, listenPort)
+
+	// Resolve variables in all targets.
+	resolved := make([]protocol.ServiceEntry, 0, len(entries))
+	for _, e := range entries {
+		re, ok := resolveEntry(e, rc)
+		if ok {
+			resolved = append(resolved, re)
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(entries); err != nil {
+	if err := json.NewEncoder(w).Encode(resolved); err != nil {
 		log.Printf("agent: failed to encode services: %v", err)
 	}
+}
+
+// resolveEntry resolves all target variables in a ServiceEntry.
+// Returns false if any target in the entry cannot be resolved.
+func resolveEntry(e protocol.ServiceEntry, rc *resolveContext) (protocol.ServiceEntry, bool) {
+	var resolvedTargets []string
+	for _, t := range e.Target.Targets {
+		rt, ok := resolveTarget(t, rc)
+		if !ok {
+			continue
+		}
+		resolvedTargets = append(resolvedTargets, rt)
+	}
+	if len(resolvedTargets) == 0 {
+		return protocol.ServiceEntry{}, false
+	}
+	e.Target.Targets = resolvedTargets
+	return e, true
 }
 
 // setupMetrics configures the self-metrics endpoint. Must be called in Start()
@@ -486,33 +516,16 @@ func (s *Server) setupMetrics() {
 	if sm.RegisterSelf {
 		var target string
 		if sm.Listen != "" {
-			// Dedicated listener: resolve wildcard host to Tailscale IP.
+			// Dedicated listener: resolve wildcard host to Tailscale IP variable.
 			host, port, err := net.SplitHostPort(sm.Listen)
 			if err == nil && (host == "" || host == "0.0.0.0" || host == "::") {
-				tsHost, _, _ := net.SplitHostPort(s.selfAddr)
-				if tsHost != "" {
-					host = tsHost
-				} else {
-					host = "localhost"
-				}
-			}
-			target = host + ":" + port + path
-		} else {
-			// Serve on main port: use selfAddr (Tailscale IP:port).
-			if s.selfAddr != "" {
-				target = s.selfAddr + path
+				target = "{ts.ip}:" + port + path
 			} else {
-				// Fallback: resolve main listen addr.
-				h, port, err := net.SplitHostPort(s.cfg.Server.Listen)
-				if err == nil {
-					if h == "" || h == "0.0.0.0" || h == "::" {
-						h = "localhost"
-					}
-					target = h + ":" + port + path
-				} else {
-					target = s.cfg.Server.Listen + path
-				}
+				target = host + ":" + port + path
 			}
+		} else {
+			// Serve on main port: use {self} (resolved per-request).
+			target = "{self}" + path
 		}
 		labels := map[string]string{
 			"__tsd_service_name": "tsd-agent",
@@ -607,7 +620,7 @@ func (s *Server) addBucket(name string, labels map[string]string, hcCfg *config.
 		Name: name,
 		Type: protocol.ServiceTypeBucket,
 		Target: protocol.SDTarget{
-			Targets: []string{s.selfHost() + "/bucket/" + name + "/metrics"},
+			Targets: []string{"{self}/bucket/" + name + "/metrics"},
 			Labels:  lbs,
 		},
 	}
@@ -642,7 +655,7 @@ func (s *Server) addProxy(name, target string, auth proxyAuth, labels map[string
 		Name: name,
 		Type: protocol.ServiceTypeProxy,
 		Target: protocol.SDTarget{
-			Targets: []string{s.selfHost() + "/proxy/" + name + "/metrics"},
+			Targets: []string{"{self}/proxy/" + name + "/metrics"},
 			Labels:  lbs,
 		},
 	}

@@ -10,24 +10,27 @@ import (
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/tsutil"
 )
 
-// detectSelfTailscaleIP returns the first IPv4 address assigned to this node
-// by Tailscale. Returns an error if Tailscale is not running or the node has
-// no addresses yet.
-func detectSelfTailscaleIP() (string, error) {
+// detectSelfTailscaleIPs returns the IPv4 and IPv6 addresses assigned to this
+// node by Tailscale. Either may be empty if not assigned.
+// Returns an error if Tailscale is not running or the node has no addresses.
+func detectSelfTailscaleIPs() (ipv4, ipv6 string, err error) {
 	var lc local.Client
 	st, err := lc.Status(context.Background())
 	if err != nil {
-		return "", fmt.Errorf("tailscale status: %w", err)
+		return "", "", fmt.Errorf("tailscale status: %w", err)
 	}
 	for _, addr := range st.TailscaleIPs {
-		if addr.Is4() {
-			return addr.String(), nil
+		if addr.Is4() && ipv4 == "" {
+			ipv4 = addr.String()
+		}
+		if addr.Is6() && ipv6 == "" {
+			ipv6 = addr.String()
 		}
 	}
-	if len(st.TailscaleIPs) > 0 {
-		return st.TailscaleIPs[0].String(), nil
+	if ipv4 == "" && ipv6 == "" {
+		return "", "", fmt.Errorf("no Tailscale IPs assigned")
 	}
-	return "", fmt.Errorf("no Tailscale IPs assigned")
+	return ipv4, ipv6, nil
 }
 
 // agentTailscaleStatus returns the current Tailscale daemon state for the agent node.

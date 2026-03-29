@@ -42,18 +42,26 @@ func RunDaemon(cfgFile string) error {
 		srv.LoadNodeAttrs(ctx)
 	}
 
-	// Detect Tailscale IP for self-referential SDTargets (bucket/proxy endpoints).
+	// Detect Tailscale IPs for self-referential SDTargets (bucket/proxy endpoints).
 	// Read the listen port from cfg AFTER nodeAttrs may have overridden it.
 	srv.mu.RLock()
 	listenAddr := srv.cfg.Server.Listen
 	srv.mu.RUnlock()
 	_, listenPort, _ := splitHostPort(listenAddr)
-	tsIP, err := detectSelfTailscaleIP()
+	ipv4, ipv6, err := detectSelfTailscaleIPs()
 	if err != nil {
 		log.Printf("agent: could not detect Tailscale IP (%v); will retry in background", err)
 	} else if listenPort != "" {
-		srv.selfAddr = tsIP + ":" + listenPort
-		log.Printf("agent: Tailscale IP detected, self address: %s", srv.selfAddr)
+		selfIP := ipv4
+		if selfIP == "" {
+			selfIP = ipv6
+		}
+		srv.mu.Lock()
+		srv.selfAddr = selfIP + ":" + listenPort
+		srv.tsIPv4 = ipv4
+		srv.tsIPv6 = ipv6
+		srv.mu.Unlock()
+		log.Printf("agent: Tailscale IP detected, self address: %s (v4=%s, v6=%s)", srv.selfAddr, ipv4, ipv6)
 	}
 
 	// Start a persistent Tailscale watcher that handles:
@@ -162,9 +170,9 @@ func watchTailscale(ctx context.Context, srv *Server, nodeAttrs bool) {
 	}
 }
 
-// detectAndSetSelfIP queries Tailscale status and updates srv.selfAddr
-// using the current listen port from srv.cfg (which may have been updated
-// by nodeAttrs).
+// detectAndSetSelfIP queries Tailscale status and updates srv.selfAddr,
+// srv.tsIPv4, and srv.tsIPv6 using the current listen port from srv.cfg
+// (which may have been updated by nodeAttrs).
 func detectAndSetSelfIP(ctx context.Context, lc *local.Client, srv *Server) {
 	srv.mu.RLock()
 	listenAddr := srv.cfg.Server.Listen
@@ -178,26 +186,34 @@ func detectAndSetSelfIP(ctx context.Context, lc *local.Client, srv *Server) {
 	if err != nil {
 		return
 	}
-	var tsIP string
+	var ipv4, ipv6 string
 	for _, addr := range st.TailscaleIPs {
-		if addr.Is4() {
-			tsIP = addr.String()
-			break
+		if addr.Is4() && ipv4 == "" {
+			ipv4 = addr.String()
+		}
+		if addr.Is6() && ipv6 == "" {
+			ipv6 = addr.String()
 		}
 	}
-	if tsIP == "" && len(st.TailscaleIPs) > 0 {
-		tsIP = st.TailscaleIPs[0].String()
+
+	// selfAddr uses IPv4 preferred (backward compatible).
+	selfIP := ipv4
+	if selfIP == "" {
+		selfIP = ipv6
 	}
-	if tsIP == "" {
+	if selfIP == "" {
 		return
 	}
-	newAddr := tsIP + ":" + listenPort
+	newAddr := selfIP + ":" + listenPort
+
 	srv.mu.Lock()
 	old := srv.selfAddr
 	srv.selfAddr = newAddr
+	srv.tsIPv4 = ipv4
+	srv.tsIPv6 = ipv6
 	srv.mu.Unlock()
 	if old != newAddr {
-		log.Printf("agent: Tailscale self address: %s", newAddr)
+		log.Printf("agent: Tailscale self address: %s (v4=%s, v6=%s)", newAddr, ipv4, ipv6)
 	}
 }
 
