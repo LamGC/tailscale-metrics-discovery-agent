@@ -430,14 +430,6 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entries := s.reg.list()
-	// Append self-metrics targets as static entries (no health check).
-	for _, t := range s.extraTargets {
-		entries = append(entries, protocol.ServiceEntry{
-			Name:   "tsd-agent-metrics",
-			Type:   protocol.ServiceTypeStatic,
-			Target: t,
-		})
-	}
 
 	// Build resolve context for this request.
 	s.mu.RLock()
@@ -446,7 +438,17 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		tsIPv6: s.tsIPv6,
 	}
 	listenAddr := s.cfg.Server.Listen
+	extras := s.extraTargets // snapshot slice header under lock
 	s.mu.RUnlock()
+
+	// Append self-metrics targets as static entries (no health check).
+	for _, t := range extras {
+		entries = append(entries, protocol.ServiceEntry{
+			Name:   "tsd-agent-metrics",
+			Type:   protocol.ServiceTypeStatic,
+			Target: t,
+		})
+	}
 
 	_, listenPort, _ := splitHostPort(listenAddr)
 	rc.selfAddr = selfAddrForRequest(r.RemoteAddr, rc.tsIPv4, rc.tsIPv6, listenPort)

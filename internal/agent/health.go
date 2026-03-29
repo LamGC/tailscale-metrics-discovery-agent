@@ -31,7 +31,7 @@ type healthChecker struct {
 func newHealthChecker(reg *registry) *healthChecker {
 	return &healthChecker{
 		reg:        reg,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cancels:    make(map[string]context.CancelFunc),
 	}
 }

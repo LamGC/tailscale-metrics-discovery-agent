@@ -103,6 +103,10 @@ func newCentralMgmtServer(s *Server) *http.Server {
 			http.Error(w, "address is required", http.StatusBadRequest)
 			return
 		}
+		if req.Port < 0 || req.Port > 65535 {
+			http.Error(w, "port must be 0-65535", http.StatusBadRequest)
+			return
+		}
 		s.col.AddManualPeer(manualPeer{
 			Name:    req.Name,
 			Address: req.Address,
@@ -165,5 +169,7 @@ func newCentralMgmtServer(s *Server) *http.Server {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("writeJSON: %v", err)
+	}
 }

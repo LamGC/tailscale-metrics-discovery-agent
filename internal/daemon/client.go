@@ -44,11 +44,15 @@ func (c *Client) Get(path string, out any) error {
 func (c *Client) Post(path string, body any, out any) error {
 	pr, pw := io.Pipe()
 	go func() {
-		_ = json.NewEncoder(pw).Encode(body)
+		if err := json.NewEncoder(pw).Encode(body); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
 		pw.Close()
 	}()
 	resp, err := c.httpClient.Post("http://localhost"+path, "application/json", pr)
 	if err != nil {
+		pr.Close() // unblock goroutine if still writing
 		return fmt.Errorf("POST %s: %w", path, err)
 	}
 	defer resp.Body.Close()

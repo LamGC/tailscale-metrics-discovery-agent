@@ -38,6 +38,7 @@ func Listen(socketPath string) (net.Listener, error) {
 	// Restrict to owner only — no other user may connect.
 	if err := os.Chmod(socketPath, 0o600); err != nil {
 		_ = ln.Close()
+		_ = os.Remove(socketPath)
 		return nil, fmt.Errorf("chmod socket: %w", err)
 	}
 	return ln, nil

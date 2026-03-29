@@ -47,6 +47,13 @@ func (d *discoverer) UpdateConfig(tags []string, port int) {
 	d.mu.Unlock()
 }
 
+// Port returns the currently configured agent port. Safe for concurrent use.
+func (d *discoverer) Port() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.port
+}
+
 func toTagSet(tags []string) map[string]struct{} {
 	s := make(map[string]struct{}, len(tags))
 	for _, t := range tags {

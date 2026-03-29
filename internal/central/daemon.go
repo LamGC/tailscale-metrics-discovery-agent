@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/daemon"
@@ -48,8 +49,8 @@ func RunDaemon(cfgFile string) error {
 	select {
 	case <-ctx.Done():
 		log.Println("central: shutting down...")
-		shutCtx, cancel := context.WithCancel(context.Background())
-		cancel() // immediate shutdown
+		shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		srv.Shutdown(shutCtx)
 		daemon.Cleanup(cfg.Management.Socket)
 		return nil

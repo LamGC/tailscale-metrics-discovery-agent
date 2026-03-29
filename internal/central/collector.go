@@ -465,7 +465,7 @@ func (c *collector) mergePeers(auto []protocol.PeerInfo) []protocol.PeerInfo {
 	for _, mp := range c.manualPeers {
 		port := mp.Port
 		if port == 0 {
-			port = c.discoverer.port
+			port = c.discoverer.Port()
 		}
 		agentURL := fmt.Sprintf("http://%s:%d", mp.Address, port)
 

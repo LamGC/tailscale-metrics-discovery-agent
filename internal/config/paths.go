@@ -30,7 +30,7 @@ func atomicWriteTOML(path string, v any) error {
 	if err := toml.NewEncoder(&buf).Encode(v); err != nil {
 		return fmt.Errorf("encoding TOML: %w", err)
 	}
-	return atomicWrite(path, buf.Bytes(), 0o644)
+	return atomicWrite(path, buf.Bytes(), 0o600)
 }
 
 // AtomicWriteJSON serialises v as indented JSON and atomically replaces path.
@@ -42,7 +42,7 @@ func AtomicWriteJSON(path string, v any) error {
 	if err != nil {
 		return fmt.Errorf("encoding JSON: %w", err)
 	}
-	return atomicWrite(path, data, 0o644)
+	return atomicWrite(path, data, 0o600)
 }
 
 // atomicWrite writes data to path by writing to a temp file and renaming.
@@ -61,7 +61,7 @@ func initConfigFile(path string, cfg any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
