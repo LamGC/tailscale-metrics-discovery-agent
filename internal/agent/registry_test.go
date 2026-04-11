@@ -130,11 +130,10 @@ func TestRegistry_HealthModifiedAt_OnChange(t *testing.T) {
 
 	// Same Status/StatusCode/Message but different LastCheck — should NOT advance.
 	time.Sleep(2 * time.Millisecond)
-	now := time.Now()
 	r.updateHealth("svc", protocol.ServiceHealthStatus{
 		Status:     protocol.ServiceHealthHealthy,
 		StatusCode: 200,
-		LastCheck:  &now, // only LastCheck changed
+		LastCheck:  new(time.Now()), // only LastCheck changed
 	})
 	t2 := r.HealthLastModified()
 	if t2.After(t1) {

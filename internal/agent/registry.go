@@ -33,8 +33,7 @@ func (r *registry) add(e protocol.ServiceEntry) error {
 	if _, ok := r.entries[e.Name]; ok {
 		return fmt.Errorf("service %q already exists", e.Name)
 	}
-	e2 := e
-	r.entries[e.Name] = &e2
+	r.entries[e.Name] = new(e)
 	r.svcModifiedAt = time.Now()
 	return nil
 }
@@ -104,8 +103,7 @@ func (r *registry) listHealth() map[string]*protocol.ServiceHealthStatus {
 	out := make(map[string]*protocol.ServiceHealthStatus, len(r.entries))
 	for name, e := range r.entries {
 		if e.Health != nil {
-			h := *e.Health
-			out[name] = &h
+			out[name] = new(*e.Health)
 		}
 	}
 	return out

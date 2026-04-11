@@ -228,11 +228,9 @@ func parsePushBody(r *http.Request) (map[string]*dto.MetricFamily, error) {
 func setLabel(m *dto.Metric, name, value string) {
 	for _, lp := range m.Label {
 		if lp.GetName() == name {
-			v := value
-			lp.Value = &v
+			lp.Value = new(value)
 			return
 		}
 	}
-	n, v := name, value
-	m.Label = append(m.Label, &dto.LabelPair{Name: &n, Value: &v})
+	m.Label = append(m.Label, &dto.LabelPair{Name: new(name), Value: new(value)})
 }

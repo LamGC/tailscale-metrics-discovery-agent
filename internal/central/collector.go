@@ -310,8 +310,8 @@ func (c *collector) ListManualPeers() []manualPeer {
 // peerResult is the per-goroutine result from querying one Agent.
 type peerResult struct {
 	idx       int
-	services  []protocol.ServiceEntry                 // nil on 304
-	targets   []protocol.SDTarget                     // nil on 304
+	services  []protocol.ServiceEntry                  // nil on 304
+	targets   []protocol.SDTarget                      // nil on 304
 	healthMap map[string]*protocol.ServiceHealthStatus // nil on 304 or old agent
 	health    protocol.AgentHealth                     // worst of svc + health queries
 	svc304    bool
@@ -348,8 +348,7 @@ func (c *collector) refresh(ctx context.Context) {
 		}
 		if cached, ok := c.serviceCache[peer.TailscaleIP]; ok && now.Sub(cached.fetchedAt) <= serviceHistoryTTL {
 			peers[i].Services = cached.services
-			t := cached.fetchedAt
-			peers[i].ServicesUpdatedAt = &t
+			peers[i].ServicesUpdatedAt = new(cached.fetchedAt)
 		}
 	}
 	c.cacheMu.RUnlock()
@@ -444,9 +443,8 @@ func (c *collector) refresh(ctx context.Context) {
 			c.serviceCache[ip] = cachedPeerServices{services: services, fetchedAt: now}
 			c.cacheMu.Unlock()
 
-			t := now
 			peers[r.idx].Services = services
-			peers[r.idx].ServicesUpdatedAt = &t
+			peers[r.idx].ServicesUpdatedAt = new(now)
 			for _, svc := range services {
 				allTargets = append(allTargets, svc.Target)
 			}

@@ -40,19 +40,19 @@ func resolveTarget(target string, rc *resolveContext) (string, bool) {
 			break
 		}
 		out.WriteString(target[i : i+open])
-		close := strings.IndexByte(target[i+open:], '}')
-		if close < 0 {
+		closeLoc := strings.IndexByte(target[i+open:], '}')
+		if closeLoc < 0 {
 			// Unclosed brace — treat as literal.
 			out.WriteString(target[i+open:])
 			break
 		}
-		varName := target[i+open+1 : i+open+close]
+		varName := target[i+open+1 : i+open+closeLoc]
 		val, ok := resolveVar(varName, rc)
 		if !ok {
 			return "", false
 		}
 		out.WriteString(val)
-		i = i + open + close + 1
+		i = i + open + closeLoc + 1
 	}
 	return out.String(), true
 }

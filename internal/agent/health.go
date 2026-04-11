@@ -111,10 +111,9 @@ func (h *healthChecker) doCheck(ctx context.Context, name, checkURL string, time
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	now := time.Now()
 	status := protocol.ServiceHealthStatus{
 		CheckURL:  checkURL,
-		LastCheck: &now,
+		LastCheck: new(time.Now()),
 	}
 
 	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, checkURL, nil)
