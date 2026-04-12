@@ -1,0 +1,15 @@
+[Unit]
+Description=Tailscale Metrics Discovery — Agent
+After=network.target
+Wants=tailscaled.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/tsd agent daemon --config /etc/tsd/agent.toml
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

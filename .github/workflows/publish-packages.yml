@@ -1,0 +1,39 @@
+name: Publish DEB packages to Nexus
+
+on:
+  release:
+    types: [published]
+
+# RPM packages are signed locally and published via scripts/sign-and-publish-rpm.sh.
+# Only unsigned DEB packages are pushed here; Nexus signs the APT repo metadata.
+
+jobs:
+  publish-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download DEB assets from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p packages
+          gh release download "${{ github.event.release.tag_name }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "*.deb" \
+            --dir packages
+
+      - name: Upload DEB packages to Nexus
+        env:
+          NEXUS_URL: ${{ vars.NEXUS_URL }}
+          NEXUS_APT_REPO: ${{ vars.NEXUS_APT_REPO }}
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+        run: |
+          for deb in packages/*.deb; do
+            [ -f "$deb" ] || continue
+            echo "Uploading $(basename "$deb") to APT repo..."
+            curl --fail --silent --show-error \
+              -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+              -X POST \
+              -F "apt.asset=@${deb}" \
+              "${NEXUS_URL}/service/rest/v1/components?repository=${NEXUS_APT_REPO}"
+          done

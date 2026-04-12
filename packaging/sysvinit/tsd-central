@@ -1,0 +1,69 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          tsd-central
+# Required-Start:    $network $remote_fs
+# Should-Start:      tailscale
+# Required-Stop:     $network $remote_fs
+# Should-Stop:       tailscale
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Tailscale Metrics Discovery — Central
+# Description:       TSD Central daemon for Prometheus service discovery via Tailscale
+### END INIT INFO
+
+set -e
+
+DAEMON="/usr/bin/tsd"
+PIDFILE="/var/run/tsd-central.pid"
+CONFIG="/etc/tsd/central.toml"
+NAME="tsd-central"
+
+# Source function library (Debian/Ubuntu or RHEL/CentOS).
+if [ -f /lib/lsb/init-functions ]; then
+    . /lib/lsb/init-functions
+elif [ -f /etc/init.d/functions ]; then
+    . /etc/init.d/functions
+fi
+
+do_start() {
+    echo "Starting $NAME..."
+    start-stop-daemon --start --quiet --background \
+        --pidfile "$PIDFILE" --make-pidfile \
+        --exec "$DAEMON" -- central daemon --config "$CONFIG" \
+        2>/dev/null \
+    || daemon --pidfile="$PIDFILE" "$DAEMON" central daemon --config "$CONFIG" &
+}
+
+do_stop() {
+    echo "Stopping $NAME..."
+    if [ -f "$PIDFILE" ]; then
+        start-stop-daemon --stop --quiet --pidfile "$PIDFILE" --retry 10 2>/dev/null \
+        || kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        rm -f "$PIDFILE"
+    fi
+}
+
+do_status() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "$NAME is running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+    echo "$NAME is not running"
+    return 1
+}
+
+case "$1" in
+    start)   do_start ;;
+    stop)    do_stop ;;
+    status)  do_status ;;
+    restart|force-reload)
+        do_stop
+        do_start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|force-reload|status}"
+        exit 1
+        ;;
+esac
+
+exit 0
