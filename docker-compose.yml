@@ -1,0 +1,32 @@
+services:
+  tsd-agent:
+    image: ghcr.io/lamgc/tsd:latest
+    command: ["agent", "daemon", "--config", "/etc/tsd/agent.toml"]
+    restart: unless-stopped
+    volumes:
+      # Agent config file (create before starting).
+      - ./config/agent.toml:/etc/tsd/agent.toml:ro
+      # Tailscale daemon socket — required for ACL tag auth and self-IP detection.
+      # Default path on Linux; adjust if tailscaled uses a custom socket.
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
+    ports:
+      # Agent HTTP API (Prometheus scrape endpoint).
+      - "9001:9001"
+
+  tsd-central:
+    image: ghcr.io/lamgc/tsd:latest
+    command: ["central", "daemon", "--config", "/etc/tsd/central.toml"]
+    restart: unless-stopped
+    volumes:
+      # Central config file (create before starting).
+      - ./config/central.toml:/etc/tsd/central.toml:ro
+      # Tailscale daemon socket — required for peer discovery via Tailscale status API.
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
+      # Persistent peer cache (survives container restarts).
+      - tsd-central-data:/var/lib/tsd
+    ports:
+      # Central HTTP API (Prometheus http_sd endpoint).
+      - "9000:9000"
+
+volumes:
+  tsd-central-data:

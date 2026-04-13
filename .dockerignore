@@ -1,0 +1,12 @@
+.git
+.github
+.idea
+.gitignore
+build/
+docs/
+packaging/
+scripts/
+*.md
+LICENSE
+.goreleaser.yml
+docker-compose.yml
