@@ -1,8 +1,8 @@
 name: Publish DEB packages to Nexus
 
-on:
-  release:
-    types: [published]
+#on:
+#  release:
+#    types: [published]
 
 # RPM packages are signed locally and published via scripts/sign-and-publish-rpm.sh.
 # Only unsigned DEB packages are pushed here; Nexus signs the APT repo metadata.
