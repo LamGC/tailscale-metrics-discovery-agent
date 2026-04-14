@@ -3,10 +3,14 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestAtomicWriteTOML_Permission(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions not supported on Windows")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.toml")
 	data := struct {
@@ -26,6 +30,9 @@ func TestAtomicWriteTOML_Permission(t *testing.T) {
 }
 
 func TestAtomicWriteJSON_Permission(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions not supported on Windows")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.json")
 	data := map[string]string{"key": "value"}
@@ -43,6 +50,9 @@ func TestAtomicWriteJSON_Permission(t *testing.T) {
 }
 
 func TestInitConfigFile_Permission(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions not supported on Windows")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "init.toml")
 	data := struct {

@@ -143,8 +143,24 @@ func TestIntegration_Healthz(t *testing.T) {
 		t.Fatalf("GET /healthz: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
+	// 200 when tailscaled is running, 503 when it is not.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 200 or 503", resp.StatusCode)
+	}
+	var got struct {
+		OK                 bool   `json:"ok"`
+		TailscaleConnected bool   `json:"tailscale_connected"`
+		TailscaleNetwork   bool   `json:"tailscale_network"`
+		BackendState       string `json:"backend_state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	if got.OK != got.TailscaleNetwork {
+		t.Errorf("ok=%v but tailscale_network=%v, should be equal", got.OK, got.TailscaleNetwork)
+	}
+	if got.BackendState == "" {
+		t.Error("backend_state should not be empty")
 	}
 }
 
