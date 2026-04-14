@@ -195,6 +195,20 @@ func proxyAddCmd() *cobra.Command {
 		Short: "Create a proxy endpoint that Agent scrapes on behalf of Prometheus",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Auto-detect auth type from provided credentials when not explicitly set.
+			if !cmd.Flags().Changed("auth-type") {
+				hasToken := token != ""
+				hasBasic := username != "" || password != ""
+				if hasToken && hasBasic {
+					return fmt.Errorf("conflicting auth: --token and --username/--password cannot be used together")
+				}
+				if hasToken {
+					authType = "bearer"
+				} else if hasBasic {
+					authType = "basic"
+				}
+			}
+
 			lbs, err := parseLabels(labels)
 			if err != nil {
 				return err
@@ -214,10 +228,10 @@ func proxyAddCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&socket, "socket", "", "Management socket path")
 	cmd.Flags().StringVarP(&target, "target", "t", "", "Upstream metrics URL (e.g. http://localhost:9100/metrics)")
-	cmd.Flags().StringVar(&authType, "auth-type", "none", "Auth type: none, bearer, basic")
-	cmd.Flags().StringVar(&token, "token", "", "Bearer token (for --auth-type bearer)")
-	cmd.Flags().StringVar(&username, "username", "", "Username (for --auth-type basic)")
-	cmd.Flags().StringVar(&password, "password", "", "Password (for --auth-type basic)")
+	cmd.Flags().StringVar(&authType, "auth-type", "none", "Auth type: none, bearer, basic (auto-detected from credentials if omitted)")
+	cmd.Flags().StringVar(&token, "token", "", "Bearer token (implies --auth-type bearer)")
+	cmd.Flags().StringVar(&username, "username", "", "Username (implies --auth-type basic)")
+	cmd.Flags().StringVar(&password, "password", "", "Password (implies --auth-type basic)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "Label in key=value format (repeatable)")
 	cmd.Flags().StringVar(&healthcheckURL, "healthcheck-url", "", "URL to GET periodically; 2xx = healthy")
 	_ = cmd.MarkFlagRequired("target")

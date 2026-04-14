@@ -121,10 +121,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // When ACL Tag auth is active (allowedCTags non-empty):
 //   - ACL Tag match → allow
 //   - ACL Tag mismatch/WhoIs fail → check Bearer token
-//     - Token configured: token must match → allow, else 401
-//     - Token not configured: decide via allow_anonymous flag
-//       - allow_anonymous=true → allow (open access)
-//       - allow_anonymous=false (default) → 401
+//   - Token configured: token must match → allow, else 401
+//   - Token not configured: decide via allow_anonymous flag
+//   - allow_anonymous=true → allow (open access)
+//   - allow_anonymous=false (default) → 401
 //
 // When ACL Tag auth is inactive (allowedCTags empty):
 //   - allow_anonymous has no effect
@@ -157,6 +157,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 					return
 				}
 				// ACL Tag required, no token configured → reject.
+				w.Header().Set("X-TSD-Auth", "rejected")
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -165,6 +166,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		// Bearer token check (standalone or fallback auth).
 		if token != "" && r.Header.Get("Authorization") != "Bearer "+token {
+			w.Header().Set("X-TSD-Auth", "rejected")
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -588,17 +590,18 @@ func (s *Server) setupMetrics() {
 			// Dedicated listener: resolve wildcard host to Tailscale IP variable.
 			host, port, err := net.SplitHostPort(sm.Listen)
 			if err == nil && (host == "" || host == "0.0.0.0" || host == "::") {
-				target = "{ts.ip}:" + port + path
+				target = "{ts.ip}:" + port
 			} else {
-				target = host + ":" + port + path
+				target = host + ":" + port
 			}
 		} else {
 			// Serve on main port: use {self} (resolved per-request).
-			target = "{self}" + path
+			target = "{self}"
 		}
 		labels := map[string]string{
 			"__tsd_service_name": "tsd-agent",
 			"__tsd_service_type": "static",
+			"__metrics_path__":   path,
 		}
 		maps.Copy(labels, sm.Labels)
 		s.extraTargets = append(s.extraTargets, protocol.SDTarget{
@@ -685,11 +688,12 @@ func (s *Server) addBucket(name string, labels map[string]string, hcCfg *config.
 	maps.Copy(lbs, labels)
 	lbs["__tsd_service_name"] = name
 	lbs["__tsd_service_type"] = "bucket"
+	lbs["__metrics_path__"] = "/bucket/" + name + "/metrics"
 	entry := protocol.ServiceEntry{
 		Name: name,
 		Type: protocol.ServiceTypeBucket,
 		Target: protocol.SDTarget{
-			Targets: []string{"{self}/bucket/" + name + "/metrics"},
+			Targets: []string{"{self}"},
 			Labels:  lbs,
 		},
 	}
@@ -720,11 +724,12 @@ func (s *Server) addProxy(name, target string, auth proxyAuth, labels map[string
 	maps.Copy(lbs, labels)
 	lbs["__tsd_service_name"] = name
 	lbs["__tsd_service_type"] = "proxy"
+	lbs["__metrics_path__"] = "/proxy/" + name + "/metrics"
 	entry := protocol.ServiceEntry{
 		Name: name,
 		Type: protocol.ServiceTypeProxy,
 		Target: protocol.SDTarget{
-			Targets: []string{"{self}/proxy/" + name + "/metrics"},
+			Targets: []string{"{self}"},
 			Labels:  lbs,
 		},
 	}

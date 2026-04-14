@@ -208,6 +208,20 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Auto-detect auth type from provided credentials.
+		if req.AuthType == "" || req.AuthType == "none" {
+			hasToken := req.Token != ""
+			hasBasic := req.Username != "" || req.Password != ""
+			if hasToken && hasBasic {
+				http.Error(w, "conflicting auth: token and username/password cannot be used together", http.StatusBadRequest)
+				return
+			}
+			if hasToken {
+				req.AuthType = "bearer"
+			} else if hasBasic {
+				req.AuthType = "basic"
+			}
+		}
 		auth := proxyAuth{
 			authType: req.AuthType,
 			token:    req.Token,

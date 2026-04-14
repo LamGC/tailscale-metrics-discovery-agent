@@ -181,27 +181,28 @@ func (s *Server) setupMetrics() {
 		labels := map[string]string{
 			"__tsd_service_name": "tsd-central",
 			"__tsd_service_type": "static",
+			"__metrics_path__":   path,
 		}
 		maps.Copy(labels, sm.Labels)
 		s.selfTargets = []protocol.SDTarget{{
-			Targets: []string{resolveListenToTarget(listenAddr, path)},
+			Targets: []string{resolveListenToHost(listenAddr)},
 			Labels:  labels,
 		}}
 	}
 }
 
-// resolveListenToTarget converts a listen address (e.g. ":9000") and a path
-// to the target string Prometheus should scrape (e.g. "localhost:9000/metrics").
+// resolveListenToHost converts a listen address (e.g. ":9000") to a
+// host:port string suitable for Prometheus targets.
 // Unspecified or wildcard hosts are replaced with "localhost".
-func resolveListenToTarget(listenAddr, path string) string {
+func resolveListenToHost(listenAddr string) string {
 	host, port, err := net.SplitHostPort(listenAddr)
 	if err != nil {
-		return listenAddr + path
+		return listenAddr
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "localhost"
 	}
-	return host + ":" + port + path
+	return host + ":" + port
 }
 
 // Start begins the collector refresh loop, then starts the HTTP and management

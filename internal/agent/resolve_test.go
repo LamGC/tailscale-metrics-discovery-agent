@@ -45,15 +45,15 @@ func TestResolveTarget_TsIP_Missing(t *testing.T) {
 func TestResolveTarget_Self(t *testing.T) {
 	rc := &resolveContext{selfAddr: "100.64.0.1:9001"}
 
-	got, ok := resolveTarget("{self}/bucket/mybucket/metrics", rc)
-	if !ok || got != "100.64.0.1:9001/bucket/mybucket/metrics" {
-		t.Errorf("resolveTarget({self}) = %q, %v; want %q, true", got, ok, "100.64.0.1:9001/bucket/mybucket/metrics")
+	got, ok := resolveTarget("{self}", rc)
+	if !ok || got != "100.64.0.1:9001" {
+		t.Errorf("resolveTarget({self}) = %q, %v; want %q, true", got, ok, "100.64.0.1:9001")
 	}
 }
 
 func TestResolveTarget_Self_Missing(t *testing.T) {
 	rc := &resolveContext{} // no selfAddr
-	_, ok := resolveTarget("{self}/bucket/x/metrics", rc)
+	_, ok := resolveTarget("{self}", rc)
 	if ok {
 		t.Error("resolveTarget({self}) should fail when selfAddr is empty")
 	}

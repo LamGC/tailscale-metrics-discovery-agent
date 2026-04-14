@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -44,7 +45,7 @@ func (p *proxy) serveMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch p.auth.authType {
+	switch strings.ToLower(p.auth.authType) {
 	case "bearer":
 		req.Header.Set("Authorization", "Bearer "+p.auth.token)
 	case "basic":
@@ -57,6 +58,14 @@ func (p *proxy) serveMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("proxy: upstream %s returned HTTP %d", p.target, resp.StatusCode)
+	}
+
+	// Mark response as proxied from upstream so callers can distinguish
+	// an upstream 401 from an Agent auth 401.
+	w.Header().Set("X-TSD-Upstream-Status", fmt.Sprintf("%d", resp.StatusCode))
 
 	// Forward Content-Type from upstream.
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
