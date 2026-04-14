@@ -12,6 +12,12 @@ services:
     ports:
       # Agent HTTP API (Prometheus scrape endpoint).
       - "9001:9001"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9001/healthz"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
   tsd-central:
     image: ghcr.io/lamgc/tsd:latest
@@ -27,6 +33,12 @@ services:
     ports:
       # Central HTTP API (Prometheus http_sd endpoint).
       - "9000:9000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/healthz"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
 volumes:
   tsd-central-data:

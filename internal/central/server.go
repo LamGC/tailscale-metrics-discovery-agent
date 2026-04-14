@@ -52,14 +52,33 @@ func NewServer(cfg config.CentralConfig) *Server {
 }
 
 func (s *Server) registerHandlers() {
-	s.mux.HandleFunc("/healthz", handleHealthz)
+	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/api/v1/sd", s.authMiddleware(s.handleSD))
 }
 
-func handleHealthz(w http.ResponseWriter, r *http.Request) {
+// handleHealthz returns the health status including Tailscale connectivity.
+// Returns 200 when healthy, 503 when unhealthy.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	ts := s.col.discoverer.TailscaleStatus(r.Context())
+	healthy := ts.Connected
+	resp := struct {
+		OK                 bool   `json:"ok"`
+		TailscaleConnected bool   `json:"tailscale_connected"`
+		TailscaleNetwork   bool   `json:"tailscale_network"`
+		BackendState       string `json:"backend_state,omitempty"`
+	}{
+		OK:                 healthy,
+		TailscaleConnected: ts.BackendState != "unreachable",
+		TailscaleNetwork:   ts.Connected,
+		BackendState:       ts.BackendState,
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"ok":true}`))
+	if healthy {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // authMiddleware enforces Bearer token auth when a token is configured.
