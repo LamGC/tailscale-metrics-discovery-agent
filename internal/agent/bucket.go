@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -181,7 +180,7 @@ func parseGroupKey(rest string) (groupKey, error) {
 	return key, nil
 }
 
-// parsePushBody reads and parses a Prometheus exposition-format body.
+// parsePushBody streams and parses a Prometheus exposition-format body.
 func parsePushBody(r *http.Request) (map[string]*dto.MetricFamily, error) {
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" {
@@ -200,11 +199,7 @@ func parsePushBody(r *http.Request) (map[string]*dto.MetricFamily, error) {
 		format = expfmt.NewFormat(expfmt.TypeTextPlain)
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading body: %w", err)
-	}
-	dec := expfmt.NewDecoder(bytes.NewReader(body), format)
+	dec := expfmt.NewDecoder(r.Body, format)
 	families := make(map[string]*dto.MetricFamily)
 	for {
 		var mf dto.MetricFamily

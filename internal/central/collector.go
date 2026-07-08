@@ -176,10 +176,20 @@ func (c *collector) loadPeerCache() {
 	}
 }
 
+func normalizeRefreshInterval(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		log.Printf("central: invalid refresh interval %s; using 5s", interval)
+		return 5 * time.Second
+	}
+	return interval
+}
+
 // Run starts the background refresh loop and the WatchIPNBus listener.
 // It blocks until ctx is cancelled.
 // If nodeAttrs is true, RefreshSelfAttrs is called on connect and netmap changes.
 func (c *collector) Run(ctx context.Context, interval time.Duration, nodeAttrs bool) {
+	interval = normalizeRefreshInterval(interval)
+
 	triggerCh := make(chan struct{}, 1)
 
 	// WatchIPNBus goroutine; auto-restarts on disconnect.
@@ -463,13 +473,7 @@ func (c *collector) refresh(ctx context.Context) {
 	// Evict cache entries whose TTL has expired (peers not in current list keep
 	// the entry alive as long as they keep showing up; peers removed from
 	// Tailscale entirely will simply age out here).
-	c.cacheMu.Lock()
-	for ip, cached := range c.serviceCache {
-		if now.Sub(cached.fetchedAt) > serviceHistoryTTL {
-			delete(c.serviceCache, ip)
-		}
-	}
-	c.cacheMu.Unlock()
+	c.evictExpiredServiceCache(now)
 	if allTargets == nil {
 		allTargets = []protocol.SDTarget{}
 	}
@@ -481,6 +485,35 @@ func (c *collector) refresh(ctx context.Context) {
 
 	// Persist the updated service cache to disk for fast startup next time.
 	go c.savePeerCache()
+}
+
+func (c *collector) hasServiceCache(ip string) bool {
+	c.cacheMu.RLock()
+	_, ok := c.serviceCache[ip]
+	c.cacheMu.RUnlock()
+	return ok
+}
+
+func (c *collector) evictExpiredServiceCache(now time.Time) {
+	var expired []string
+	c.cacheMu.Lock()
+	for ip, cached := range c.serviceCache {
+		if now.Sub(cached.fetchedAt) > serviceHistoryTTL {
+			delete(c.serviceCache, ip)
+			expired = append(expired, ip)
+		}
+	}
+	c.cacheMu.Unlock()
+
+	if len(expired) == 0 {
+		return
+	}
+	c.condMu.Lock()
+	for _, ip := range expired {
+		delete(c.lastModifiedSvc, ip)
+		delete(c.lastModifiedHealth, ip)
+	}
+	c.condMu.Unlock()
 }
 
 // queryAgentServices fetches the service list (without health) from a single Agent.
@@ -499,12 +532,16 @@ func (c *collector) queryAgentServices(ctx context.Context, peer protocol.PeerIn
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	// Conditional request: send If-Modified-Since if we have a stored value.
-	c.condMu.RLock()
-	if lm, ok := c.lastModifiedSvc[peer.TailscaleIP]; ok {
-		req.Header.Set("If-Modified-Since", lm)
+	// Conditional request: send If-Modified-Since only when the matching
+	// service cache entry is still present. A stale Last-Modified without
+	// cached services would make a 304 response unusable.
+	if c.hasServiceCache(peer.TailscaleIP) {
+		c.condMu.RLock()
+		if lm, ok := c.lastModifiedSvc[peer.TailscaleIP]; ok {
+			req.Header.Set("If-Modified-Since", lm)
+		}
+		c.condMu.RUnlock()
 	}
-	c.condMu.RUnlock()
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -560,12 +597,15 @@ func (c *collector) queryAgentHealth(ctx context.Context, peer protocol.PeerInfo
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	// Conditional request.
-	c.condMu.RLock()
-	if lm, ok := c.lastModifiedHealth[peer.TailscaleIP]; ok {
-		req.Header.Set("If-Modified-Since", lm)
+	// Conditional request. Health is merged into the cached service entries, so
+	// only send If-Modified-Since while the service cache is available.
+	if c.hasServiceCache(peer.TailscaleIP) {
+		c.condMu.RLock()
+		if lm, ok := c.lastModifiedHealth[peer.TailscaleIP]; ok {
+			req.Header.Set("If-Modified-Since", lm)
+		}
+		c.condMu.RUnlock()
 	}
-	c.condMu.RUnlock()
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

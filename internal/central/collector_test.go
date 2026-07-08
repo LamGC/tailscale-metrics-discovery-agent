@@ -161,10 +161,13 @@ func TestQueryAgentServices_304(t *testing.T) {
 	peer := protocol.PeerInfo{TailscaleIP: "127.0.0.1", AgentURL: srv.URL}
 
 	// First call: should get data.
-	_, _, _, notMod, _ := c.queryAgentServices(context.Background(), peer)
+	services, _, _, notMod, _ := c.queryAgentServices(context.Background(), peer)
 	if notMod {
 		t.Error("first call should not be 304")
 	}
+	c.cacheMu.Lock()
+	c.serviceCache[peer.TailscaleIP] = cachedPeerServices{services: services, fetchedAt: time.Now()}
+	c.cacheMu.Unlock()
 
 	// Second call: should get 304.
 	_, _, health, notMod, _ := c.queryAgentServices(context.Background(), peer)
@@ -173,6 +176,72 @@ func TestQueryAgentServices_304(t *testing.T) {
 	}
 	if health != protocol.AgentHealthOK {
 		t.Errorf("304 should return AgentHealthOK, got %q", health)
+	}
+}
+
+func TestQueryAgentServices_DoesNotSendConditionalWithoutServiceCache(t *testing.T) {
+	lm := time.Now().UTC().Format(http.TimeFormat)
+	var capturedIMS string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedIMS = r.Header.Get("If-Modified-Since")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Last-Modified", lm)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	c := newTestCollector()
+	peer := protocol.PeerInfo{TailscaleIP: "127.0.0.1", AgentURL: srv.URL}
+	c.condMu.Lock()
+	c.lastModifiedSvc[peer.TailscaleIP] = lm
+	c.condMu.Unlock()
+
+	_, _, health, notMod, err := c.queryAgentServices(context.Background(), peer)
+	if err != nil {
+		t.Fatalf("queryAgentServices: %v", err)
+	}
+	if health != protocol.AgentHealthOK || notMod {
+		t.Fatalf("health=%q notMod=%v, want ok false", health, notMod)
+	}
+	if capturedIMS != "" {
+		t.Fatalf("If-Modified-Since = %q, want empty without cache", capturedIMS)
+	}
+}
+
+func TestEvictExpiredServiceCacheClearsConditionalState(t *testing.T) {
+	c := newTestCollector()
+	ip := "100.1.1.1"
+	c.cacheMu.Lock()
+	c.serviceCache[ip] = cachedPeerServices{fetchedAt: time.Now().Add(-serviceHistoryTTL - time.Second)}
+	c.cacheMu.Unlock()
+	c.condMu.Lock()
+	c.lastModifiedSvc[ip] = "svc-lm"
+	c.lastModifiedHealth[ip] = "health-lm"
+	c.condMu.Unlock()
+
+	c.evictExpiredServiceCache(time.Now())
+
+	if c.hasServiceCache(ip) {
+		t.Fatal("expired service cache still present")
+	}
+	c.condMu.RLock()
+	_, svcOK := c.lastModifiedSvc[ip]
+	_, healthOK := c.lastModifiedHealth[ip]
+	c.condMu.RUnlock()
+	if svcOK || healthOK {
+		t.Fatalf("conditional state not cleared: svc=%v health=%v", svcOK, healthOK)
+	}
+}
+
+func TestNormalizeRefreshInterval(t *testing.T) {
+	if got := normalizeRefreshInterval(0); got != 5*time.Second {
+		t.Fatalf("normalizeRefreshInterval(0) = %s, want 5s", got)
+	}
+	if got := normalizeRefreshInterval(-time.Second); got != 5*time.Second {
+		t.Fatalf("normalizeRefreshInterval(-1s) = %s, want 5s", got)
+	}
+	if got := normalizeRefreshInterval(30 * time.Second); got != 30*time.Second {
+		t.Fatalf("normalizeRefreshInterval(30s) = %s, want 30s", got)
 	}
 }
 
@@ -300,6 +369,9 @@ func TestQueryAgentHealth_304(t *testing.T) {
 	peer := protocol.PeerInfo{TailscaleIP: "127.0.0.1", AgentURL: srv.URL}
 
 	c.queryAgentHealth(context.Background(), peer)
+	c.cacheMu.Lock()
+	c.serviceCache[peer.TailscaleIP] = cachedPeerServices{services: []protocol.ServiceEntry{}, fetchedAt: time.Now()}
+	c.cacheMu.Unlock()
 	_, health, notMod, _ := c.queryAgentHealth(context.Background(), peer)
 	if !notMod {
 		t.Error("second call should be 304")
