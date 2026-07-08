@@ -43,6 +43,7 @@ type Server struct {
 	proxies      *proxyStore
 	mux          *http.ServeMux
 	httpSrv      *http.Server
+	httpErrCh    chan<- error
 	mgmtSrv      *http.Server
 	metricsSrv   *http.Server        // optional dedicated metrics listener
 	selfAddr     string              // host:port announced in SDTargets for dynamic services (v4 preferred)
@@ -240,10 +241,12 @@ func (s *Server) LoadNodeAttrs(ctx context.Context) {
 		log.Printf("agent: failed to read nodeAttrs: %v (retaining previous)", err)
 		return
 	}
+
+	var newListen string
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if attrs == nil {
 		s.allowedCTags = nil
+		s.mu.Unlock()
 		return
 	}
 	if len(attrs.CentralTags) > 0 {
@@ -253,11 +256,23 @@ func (s *Server) LoadNodeAttrs(ctx context.Context) {
 		s.allowedCTags = nil
 	}
 	if attrs.AgentPort > 0 {
-		newListen := fmt.Sprintf(":%d", attrs.AgentPort)
-		if s.cfg.Server.Listen != newListen {
-			log.Printf("agent: nodeAttrs overriding listen port to %s", newListen)
-			s.cfg.Server.Listen = newListen
+		candidate := fmt.Sprintf(":%d", attrs.AgentPort)
+		if s.cfg.Server.Listen != candidate {
+			if s.httpSrv == nil {
+				log.Printf("agent: nodeAttrs overriding listen port to %s", candidate)
+				s.cfg.Server.Listen = candidate
+			} else {
+				newListen = candidate
+			}
 		}
+	}
+	s.mu.Unlock()
+
+	if newListen == "" {
+		return
+	}
+	if err := s.rebindHTTPServer(newListen); err != nil {
+		log.Printf("agent: nodeAttrs listen port update to %s failed: %v", newListen, err)
 	}
 }
 
@@ -350,40 +365,38 @@ func (s *Server) Start() error {
 	}
 	s.setupMetrics()
 
-	h2s := &http2.Server{}
-	s.httpSrv = &http.Server{
-		Addr:    s.cfg.Server.Listen,
-		Handler: h2c.NewHandler(s.mux, h2s),
+	errCh := make(chan error, 3)
+	s.mu.Lock()
+	s.httpErrCh = errCh
+	listenAddr := s.cfg.Server.Listen
+	mgmtSocket := s.cfg.Management.Socket
+	metricsSrv := s.metricsSrv
+	metricsListen := s.cfg.SelfMetrics.Listen
+	s.mu.Unlock()
+
+	if err := s.startHTTPServer(listenAddr, errCh); err != nil {
+		return err
 	}
 
-	errCh := make(chan error, 3)
-
-	go func() {
-		log.Printf("agent: HTTP server listening on %s", s.cfg.Server.Listen)
-		if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- fmt.Errorf("agent HTTP server: %w", err)
-		}
-	}()
-
-	if s.metricsSrv != nil {
+	if metricsSrv != nil {
 		go func() {
-			log.Printf("agent: self-metrics listening on %s", s.cfg.SelfMetrics.Listen)
-			if err := s.metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("agent: self-metrics listening on %s", metricsListen)
+			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				errCh <- fmt.Errorf("agent metrics server: %w", err)
 			}
 		}()
 	}
 
-	if s.cfg.Management.Socket != "" {
+	if mgmtSocket != "" {
 		mgmt := newMgmtServer(s)
 		s.mgmtSrv = mgmt
 		go func() {
-			ln, err := daemon.Listen(s.cfg.Management.Socket)
+			ln, err := daemon.Listen(mgmtSocket)
 			if err != nil {
 				errCh <- fmt.Errorf("agent mgmt socket: %w", err)
 				return
 			}
-			log.Printf("agent: management socket at %s", s.cfg.Management.Socket)
+			log.Printf("agent: management socket at %s", mgmtSocket)
 			if err := mgmt.Serve(ln); err != nil && err != http.ErrServerClosed {
 				errCh <- fmt.Errorf("agent mgmt server: %w", err)
 			}
@@ -393,21 +406,115 @@ func (s *Server) Start() error {
 	return <-errCh
 }
 
-// Shutdown gracefully stops the server.
-func (s *Server) Shutdown(ctx context.Context) {
+func (s *Server) startHTTPServer(addr string, errCh chan<- error) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("agent HTTP server listen %s: %w", addr, err)
+	}
+	srv := newAgentHTTPServer(addr, s.mux)
+
 	s.mu.Lock()
-	if s.hcCancel != nil {
-		s.hcCancel()
+	s.httpSrv = srv
+	if errCh != nil {
+		s.httpErrCh = errCh
 	}
 	s.mu.Unlock()
-	if s.httpSrv != nil {
-		_ = s.httpSrv.Shutdown(ctx)
+
+	s.serveHTTPServer(srv, ln, errCh)
+	return nil
+}
+
+func newAgentHTTPServer(addr string, handler http.Handler) *http.Server {
+	h2s := &http2.Server{}
+	return &http.Server{
+		Addr:    addr,
+		Handler: h2c.NewHandler(handler, h2s),
 	}
-	if s.metricsSrv != nil {
-		_ = s.metricsSrv.Shutdown(ctx)
+}
+
+func (s *Server) serveHTTPServer(srv *http.Server, ln net.Listener, errCh chan<- error) {
+	go func() {
+		log.Printf("agent: HTTP server listening on %s", srv.Addr)
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			if errCh != nil {
+				errCh <- fmt.Errorf("agent HTTP server: %w", err)
+				return
+			}
+			log.Printf("agent: HTTP server error: %v", err)
+		}
+	}()
+}
+
+func (s *Server) rebindHTTPServer(addr string) error {
+	s.mu.RLock()
+	oldSrv := s.httpSrv
+	if oldSrv == nil {
+		s.mu.RUnlock()
+		return nil
 	}
-	if s.mgmtSrv != nil {
-		_ = s.mgmtSrv.Shutdown(ctx)
+	if oldSrv.Addr == addr {
+		s.mu.RUnlock()
+		return nil
+	}
+	errCh := s.httpErrCh
+	s.mu.RUnlock()
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	newSrv := newAgentHTTPServer(addr, s.mux)
+
+	s.mu.Lock()
+	oldSrv = s.httpSrv
+	if oldSrv == nil {
+		s.cfg.Server.Listen = addr
+		s.mu.Unlock()
+		_ = ln.Close()
+		return nil
+	}
+	if oldSrv.Addr == addr {
+		s.cfg.Server.Listen = addr
+		s.mu.Unlock()
+		_ = ln.Close()
+		return nil
+	}
+	errCh = s.httpErrCh
+	s.httpSrv = newSrv
+	s.cfg.Server.Listen = addr
+	s.mu.Unlock()
+
+	s.serveHTTPServer(newSrv, ln, errCh)
+	log.Printf("agent: nodeAttrs overriding listen port to %s", addr)
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := oldSrv.Shutdown(shutCtx); err != nil {
+		log.Printf("agent: old HTTP server shutdown after listen rebind: %v", err)
+	}
+	return nil
+}
+
+// Shutdown gracefully stops the server.
+func (s *Server) Shutdown(ctx context.Context) {
+	s.mu.RLock()
+	hcCancel := s.hcCancel
+	httpSrv := s.httpSrv
+	metricsSrv := s.metricsSrv
+	mgmtSrv := s.mgmtSrv
+	s.mu.RUnlock()
+
+	if hcCancel != nil {
+		hcCancel()
+	}
+	if httpSrv != nil {
+		_ = httpSrv.Shutdown(ctx)
+	}
+	if metricsSrv != nil {
+		_ = metricsSrv.Shutdown(ctx)
+	}
+	if mgmtSrv != nil {
+		_ = mgmtSrv.Shutdown(ctx)
 	}
 }
 

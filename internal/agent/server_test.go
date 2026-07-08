@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
@@ -373,4 +376,95 @@ func TestFilterSlice(t *testing.T) {
 	if len(out) != 2 || out[0] != 2 || out[1] != 4 {
 		t.Errorf("filterSlice = %v, want [2 4]", out)
 	}
+}
+
+func TestRebindHTTPServerMovesListener(t *testing.T) {
+	oldAddr := freeTCPAddr(t)
+	s := newTestServer(config.AgentConfig{Server: config.AgentServer{Listen: oldAddr}})
+	errCh := make(chan error, 1)
+	if err := s.startHTTPServer(oldAddr, errCh); err != nil {
+		t.Fatalf("startHTTPServer: %v", err)
+	}
+	defer s.Shutdown(context.Background())
+
+	newAddr := freeTCPAddr(t)
+	if err := s.rebindHTTPServer(newAddr); err != nil {
+		t.Fatalf("rebindHTTPServer: %v", err)
+	}
+
+	s.mu.RLock()
+	gotListen := s.cfg.Server.Listen
+	gotSrvAddr := s.httpSrv.Addr
+	s.mu.RUnlock()
+	if gotListen != newAddr {
+		t.Fatalf("cfg listen = %q, want %q", gotListen, newAddr)
+	}
+	if gotSrvAddr != newAddr {
+		t.Fatalf("http server addr = %q, want %q", gotSrvAddr, newAddr)
+	}
+
+	client := &http.Client{Timeout: time.Second}
+	resp, err := client.Get("http://" + newAddr + "/api/v1/services")
+	if err != nil {
+		t.Fatalf("GET new listener: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("new listener status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestRebindHTTPServerKeepsOldListenerWhenNewListenFails(t *testing.T) {
+	oldAddr := freeTCPAddr(t)
+	s := newTestServer(config.AgentConfig{Server: config.AgentServer{Listen: oldAddr}})
+	errCh := make(chan error, 1)
+	if err := s.startHTTPServer(oldAddr, errCh); err != nil {
+		t.Fatalf("startHTTPServer: %v", err)
+	}
+	defer s.Shutdown(context.Background())
+
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen busy port: %v", err)
+	}
+	defer busy.Close()
+	busyAddr := busy.Addr().String()
+
+	if err := s.rebindHTTPServer(busyAddr); err == nil {
+		t.Fatal("rebindHTTPServer unexpectedly succeeded on busy port")
+	}
+
+	s.mu.RLock()
+	gotListen := s.cfg.Server.Listen
+	gotSrvAddr := s.httpSrv.Addr
+	s.mu.RUnlock()
+	if gotListen != oldAddr {
+		t.Fatalf("cfg listen = %q, want old addr %q", gotListen, oldAddr)
+	}
+	if gotSrvAddr != oldAddr {
+		t.Fatalf("http server addr = %q, want old addr %q", gotSrvAddr, oldAddr)
+	}
+
+	client := &http.Client{Timeout: time.Second}
+	resp, err := client.Get("http://" + oldAddr + "/api/v1/services")
+	if err != nil {
+		t.Fatalf("GET old listener after failed rebind: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("old listener status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func freeTCPAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find free TCP addr: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close free TCP addr listener: %v", err)
+	}
+	return addr
 }
