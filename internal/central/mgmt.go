@@ -107,20 +107,29 @@ func newCentralMgmtServer(s *Server) *http.Server {
 			http.Error(w, "port must be 0-65535", http.StatusBadRequest)
 			return
 		}
+		nextCfg := func() config.CentralConfig {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			cfg := cloneCentralConfig(s.cfg)
+			cfg.ManualPeers = append(cfg.ManualPeers, config.ManualPeer{
+				Name:    req.Name,
+				Address: req.Address,
+				Port:    req.Port,
+			})
+			return cfg
+		}()
+		if err := s.saveCentralConfig(nextCfg); err != nil {
+			http.Error(w, "saving config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		s.col.AddManualPeer(manualPeer{
 			Name:    req.Name,
 			Address: req.Address,
 			Port:    req.Port,
 		})
 		s.mu.Lock()
-		s.cfg.ManualPeers = append(s.cfg.ManualPeers, config.ManualPeer{
-			Name:    req.Name,
-			Address: req.Address,
-			Port:    req.Port,
-		})
-		cfg := s.cfg
+		s.cfg = nextCfg
 		s.mu.Unlock()
-		s.saveCentralConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -137,15 +146,26 @@ func newCentralMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.mu.Lock()
+		oldCfg := cloneCentralConfig(s.cfg)
+		nextCfg := cloneCentralConfig(s.cfg)
+		s.mu.Unlock()
+		nextCfg.ManualPeers = filterManualPeers(nextCfg.ManualPeers, req.Address)
+		if err := s.saveCentralConfig(nextCfg); err != nil {
+			http.Error(w, "saving config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if !s.col.RemoveManualPeer(req.Address) {
+			if rollbackErr := s.saveCentralConfig(oldCfg); rollbackErr != nil {
+				http.Error(w, "saving config after rollback: "+rollbackErr.Error(), http.StatusInternalServerError)
+				return
+			}
 			http.Error(w, "peer not found", http.StatusNotFound)
 			return
 		}
 		s.mu.Lock()
-		s.cfg.ManualPeers = filterManualPeers(s.cfg.ManualPeers, req.Address)
-		cfg := s.cfg
+		s.cfg = nextCfg
 		s.mu.Unlock()
-		s.saveCentralConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -165,6 +185,25 @@ func newCentralMgmtServer(s *Server) *http.Server {
 	})
 
 	return &http.Server{Handler: mux}
+}
+
+func cloneCentralConfig(cfg config.CentralConfig) config.CentralConfig {
+	out := config.CentralConfig{
+		Server:      cfg.Server,
+		Tailscale:   cfg.Tailscale,
+		Discovery:   cfg.Discovery,
+		Management:  cfg.Management,
+		ManualPeers: make([]config.ManualPeer, len(cfg.ManualPeers)),
+		SelfMetrics: cfg.SelfMetrics,
+	}
+	for i, p := range cfg.ManualPeers {
+		out.ManualPeers[i] = config.ManualPeer{
+			Name:    p.Name,
+			Address: p.Address,
+			Port:    p.Port,
+		}
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

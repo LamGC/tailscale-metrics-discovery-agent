@@ -64,20 +64,32 @@ func newMgmtServer(s *Server) *http.Server {
 		if req.HealthcheckURL != "" {
 			hcCfg = &config.HealthcheckConfig{URL: req.HealthcheckURL}
 		}
-		if err := s.addStatic(req.Name, req.Targets, req.Labels, hcCfg); err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
+
 		s.mu.Lock()
-		s.cfg.Statics = append(s.cfg.Statics, config.StaticService{
+		oldCfg := cloneAgentConfig(s.cfg)
+		nextCfg := cloneAgentConfig(s.cfg)
+		s.mu.Unlock()
+		nextCfg.Statics = append(nextCfg.Statics, config.StaticService{
 			Name:        req.Name,
 			Targets:     req.Targets,
 			Labels:      req.Labels,
 			Healthcheck: hcCfg,
 		})
-		cfg := s.cfg
+		if err := s.saveConfig(nextCfg); err != nil {
+			http.Error(w, "saving config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.addStatic(req.Name, req.Targets, req.Labels, hcCfg); err != nil {
+			if rollbackErr := s.saveConfig(oldCfg); rollbackErr != nil {
+				http.Error(w, "saving config after rollback: "+rollbackErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		s.mu.Lock()
+		s.cfg = nextCfg
 		s.mu.Unlock()
-		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -94,15 +106,26 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.mu.Lock()
+		oldCfg := cloneAgentConfig(s.cfg)
+		nextCfg := cloneAgentConfig(s.cfg)
+		s.mu.Unlock()
+		nextCfg.Statics = filterSlice(nextCfg.Statics, func(v config.StaticService) bool { return v.Name != req.Name })
+		if err := s.saveConfig(nextCfg); err != nil {
+			http.Error(w, "saving config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if err := s.removeStatic(req.Name); err != nil {
+			if rollbackErr := s.saveConfig(oldCfg); rollbackErr != nil {
+				http.Error(w, "saving config after rollback: "+rollbackErr.Error(), http.StatusInternalServerError)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
 		s.mu.Lock()
-		s.cfg.Statics = filterSlice(s.cfg.Statics, func(v config.StaticService) bool { return v.Name != req.Name })
-		cfg := s.cfg
+		s.cfg = nextCfg
 		s.mu.Unlock()
-		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -125,19 +148,30 @@ func newMgmtServer(s *Server) *http.Server {
 		if req.HealthcheckURL != "" {
 			hcCfg = &config.HealthcheckConfig{URL: req.HealthcheckURL}
 		}
-		if err := s.addBucket(req.Name, req.Labels, hcCfg); err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
 		s.mu.Lock()
-		s.cfg.Buckets = append(s.cfg.Buckets, config.BucketService{
+		oldCfg := cloneAgentConfig(s.cfg)
+		nextCfg := cloneAgentConfig(s.cfg)
+		s.mu.Unlock()
+		nextCfg.Buckets = append(nextCfg.Buckets, config.BucketService{
 			Name:        req.Name,
 			Labels:      req.Labels,
 			Healthcheck: hcCfg,
 		})
-		cfg := s.cfg
+		if err := s.saveConfig(nextCfg); err != nil {
+			http.Error(w, "saving config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.addBucket(req.Name, req.Labels, hcCfg); err != nil {
+			if rollbackErr := s.saveConfig(oldCfg); rollbackErr != nil {
+				http.Error(w, "saving config after rollback: "+rollbackErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		s.mu.Lock()
+		s.cfg = nextCfg
 		s.mu.Unlock()
-		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -154,15 +188,26 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.mu.Lock()
+		oldCfg := cloneAgentConfig(s.cfg)
+		nextCfg := cloneAgentConfig(s.cfg)
+		s.mu.Unlock()
+		nextCfg.Buckets = filterSlice(nextCfg.Buckets, func(v config.BucketService) bool { return v.Name != req.Name })
+		if err := s.saveConfig(nextCfg); err != nil {
+			http.Error(w, "saving config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if err := s.removeBucket(req.Name); err != nil {
+			if rollbackErr := s.saveConfig(oldCfg); rollbackErr != nil {
+				http.Error(w, "saving config after rollback: "+rollbackErr.Error(), http.StatusInternalServerError)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
 		s.mu.Lock()
-		s.cfg.Buckets = filterSlice(s.cfg.Buckets, func(v config.BucketService) bool { return v.Name != req.Name })
-		cfg := s.cfg
+		s.cfg = nextCfg
 		s.mu.Unlock()
-		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -232,21 +277,32 @@ func newMgmtServer(s *Server) *http.Server {
 		if req.HealthcheckURL != "" {
 			hcCfg = &config.HealthcheckConfig{URL: req.HealthcheckURL}
 		}
-		if err := s.addProxy(req.Name, req.Target, auth, req.Labels, hcCfg); err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
 		s.mu.Lock()
-		s.cfg.Proxies = append(s.cfg.Proxies, config.ProxyService{
+		oldCfg := cloneAgentConfig(s.cfg)
+		nextCfg := cloneAgentConfig(s.cfg)
+		s.mu.Unlock()
+		nextCfg.Proxies = append(nextCfg.Proxies, config.ProxyService{
 			Name:        req.Name,
 			Target:      req.Target,
 			Auth:        config.ProxyAuth{Type: req.AuthType, Token: req.Token, Username: req.Username, Password: req.Password},
 			Labels:      req.Labels,
 			Healthcheck: hcCfg,
 		})
-		cfg := s.cfg
+		if err := s.saveConfig(nextCfg); err != nil {
+			http.Error(w, "saving config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.addProxy(req.Name, req.Target, auth, req.Labels, hcCfg); err != nil {
+			if rollbackErr := s.saveConfig(oldCfg); rollbackErr != nil {
+				http.Error(w, "saving config after rollback: "+rollbackErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		s.mu.Lock()
+		s.cfg = nextCfg
 		s.mu.Unlock()
-		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -263,19 +319,96 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.mu.Lock()
+		oldCfg := cloneAgentConfig(s.cfg)
+		nextCfg := cloneAgentConfig(s.cfg)
+		s.mu.Unlock()
+		nextCfg.Proxies = filterSlice(nextCfg.Proxies, func(v config.ProxyService) bool { return v.Name != req.Name })
+		if err := s.saveConfig(nextCfg); err != nil {
+			http.Error(w, "saving config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if err := s.removeProxy(req.Name); err != nil {
+			if rollbackErr := s.saveConfig(oldCfg); rollbackErr != nil {
+				http.Error(w, "saving config after rollback: "+rollbackErr.Error(), http.StatusInternalServerError)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
 		s.mu.Lock()
-		s.cfg.Proxies = filterSlice(s.cfg.Proxies, func(v config.ProxyService) bool { return v.Name != req.Name })
-		cfg := s.cfg
+		s.cfg = nextCfg
 		s.mu.Unlock()
-		s.saveConfig(cfg)
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
 	return &http.Server{Handler: mux}
+}
+
+func cloneAgentConfig(cfg config.AgentConfig) config.AgentConfig {
+	out := config.AgentConfig{
+		Server:      cfg.Server,
+		Management:  cfg.Management,
+		SelfMetrics: cloneSelfMetricsConfig(cfg.SelfMetrics),
+		Statics:     make([]config.StaticService, len(cfg.Statics)),
+		Buckets:     make([]config.BucketService, len(cfg.Buckets)),
+		Proxies:     make([]config.ProxyService, len(cfg.Proxies)),
+	}
+
+	for i, st := range cfg.Statics {
+		out.Statics[i] = config.StaticService{
+			Name:        st.Name,
+			Targets:     append([]string(nil), st.Targets...),
+			Labels:      copyStringMap(st.Labels),
+			Healthcheck: cloneHealthcheck(st.Healthcheck),
+		}
+	}
+	for i, bc := range cfg.Buckets {
+		out.Buckets[i] = config.BucketService{
+			Name:        bc.Name,
+			Labels:      copyStringMap(bc.Labels),
+			Healthcheck: cloneHealthcheck(bc.Healthcheck),
+		}
+	}
+	for i, pc := range cfg.Proxies {
+		out.Proxies[i] = config.ProxyService{
+			Name:        pc.Name,
+			Target:      pc.Target,
+			Auth:        pc.Auth,
+			Labels:      copyStringMap(pc.Labels),
+			Healthcheck: cloneHealthcheck(pc.Healthcheck),
+		}
+	}
+	return out
+}
+
+func cloneSelfMetricsConfig(cfg config.SelfMetricsConfig) config.SelfMetricsConfig {
+	return config.SelfMetricsConfig{
+		Enabled:      cfg.Enabled,
+		Path:         cfg.Path,
+		Listen:       cfg.Listen,
+		RegisterSelf: cfg.RegisterSelf,
+		Labels:       copyStringMap(cfg.Labels),
+	}
+}
+
+func cloneHealthcheck(cfg *config.HealthcheckConfig) *config.HealthcheckConfig {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	return &out
+}
+
+func copyStringMap(src map[string]string) map[string]string {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
