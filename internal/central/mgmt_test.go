@@ -69,3 +69,23 @@ func TestMgmtPeerAdd_MissingAddress(t *testing.T) {
 		t.Errorf("missing address: got status %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }
+
+func TestMgmtPeerAddReturnsErrorWhenSaveFails(t *testing.T) {
+	srv := newTestCentralServer()
+	srv.cfgFile = t.TempDir()
+	mgmt := newCentralMgmtServer(srv)
+
+	body, _ := json.Marshal(map[string]any{
+		"name":    "test-peer",
+		"address": "100.64.0.1",
+		"port":    9001,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/mgmt/peer/add", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mgmt.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body: %s", w.Code, w.Body.String())
+	}
+}

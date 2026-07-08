@@ -254,13 +254,16 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 // saveCentralConfig atomically writes cfg to the configured config file.
-func (s *Server) saveCentralConfig(cfg config.CentralConfig) {
+// It returns persistence errors so management callers can report them.
+func (s *Server) saveCentralConfig(cfg config.CentralConfig) error {
 	if s.cfgFile == "" {
-		return
+		return nil
 	}
 	if err := config.SaveCentralConfig(s.cfgFile, cfg); err != nil {
 		log.Printf("central: failed to save config: %v", err)
+		return err
 	}
+	return nil
 }
 
 // filterManualPeers returns a new slice with the peer at address removed.
