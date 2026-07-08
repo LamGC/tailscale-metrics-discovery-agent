@@ -19,7 +19,7 @@ type registry struct {
 }
 
 func newRegistry() *registry {
-	now := time.Now()
+	now := time.Now().UTC().Truncate(time.Second)
 	return &registry{
 		entries:          make(map[string]*protocol.ServiceEntry),
 		svcModifiedAt:    now,
@@ -34,7 +34,7 @@ func (r *registry) add(e protocol.ServiceEntry) error {
 		return fmt.Errorf("service %q already exists", e.Name)
 	}
 	r.entries[e.Name] = new(e)
-	r.svcModifiedAt = time.Now()
+	r.svcModifiedAt = nextModifiedAt(r.svcModifiedAt)
 	return nil
 }
 
@@ -45,7 +45,7 @@ func (r *registry) remove(name string) error {
 		return fmt.Errorf("service %q not found", name)
 	}
 	delete(r.entries, name)
-	r.svcModifiedAt = time.Now()
+	r.svcModifiedAt = nextModifiedAt(r.svcModifiedAt)
 	return nil
 }
 
@@ -95,6 +95,13 @@ func (r *registry) sortedEntries(includeHealth bool) []protocol.ServiceEntry {
 	return out
 }
 
+// touchServices marks the service list as changed for HTTP conditional requests.
+func (r *registry) touchServices() {
+	r.mu.Lock()
+	r.svcModifiedAt = nextModifiedAt(r.svcModifiedAt)
+	r.mu.Unlock()
+}
+
 // listHealth returns a map of service name to current health status.
 // Services without a health check are omitted.
 func (r *registry) listHealth() map[string]*protocol.ServiceHealthStatus {
@@ -139,6 +146,14 @@ func (r *registry) updateHealth(name string, h protocol.ServiceHealthStatus) {
 		e.Health.Message != h.Message
 	e.Health = &h
 	if changed {
-		r.healthModifiedAt = time.Now()
+		r.healthModifiedAt = nextModifiedAt(r.healthModifiedAt)
 	}
+}
+
+func nextModifiedAt(prev time.Time) time.Time {
+	now := time.Now().UTC().Truncate(time.Second)
+	if !now.After(prev) {
+		return prev.Add(time.Second)
+	}
+	return now
 }

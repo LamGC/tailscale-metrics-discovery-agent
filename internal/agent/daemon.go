@@ -207,12 +207,18 @@ func detectAndSetSelfIP(ctx context.Context, lc *local.Client, srv *Server) {
 	newAddr := selfIP + ":" + listenPort
 
 	srv.mu.Lock()
-	old := srv.selfAddr
+	oldSelfAddr := srv.selfAddr
+	oldIPv4 := srv.tsIPv4
+	oldIPv6 := srv.tsIPv6
 	srv.selfAddr = newAddr
 	srv.tsIPv4 = ipv4
 	srv.tsIPv6 = ipv6
+	changed := oldSelfAddr != newAddr || oldIPv4 != ipv4 || oldIPv6 != ipv6
 	srv.mu.Unlock()
-	if old != newAddr {
+	if changed {
+		srv.reg.touchServices()
+	}
+	if oldSelfAddr != newAddr {
 		log.Printf("agent: Tailscale self address: %s (v4=%s, v6=%s)", newAddr, ipv4, ipv6)
 	}
 }

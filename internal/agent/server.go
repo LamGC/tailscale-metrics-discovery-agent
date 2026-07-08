@@ -295,6 +295,7 @@ func (s *Server) Reload() error {
 	}
 	s.mu.Lock()
 	s.cfg = cfg
+	running := s.httpSrv != nil
 	s.mu.Unlock()
 
 	// Handle node_attrs toggle on reload.
@@ -302,6 +303,15 @@ func (s *Server) Reload() error {
 		s.LoadNodeAttrs(context.Background())
 	} else {
 		s.ClearNodeAttrs()
+	}
+
+	if running {
+		s.mu.RLock()
+		listenAddr := s.cfg.Server.Listen
+		s.mu.RUnlock()
+		if err := s.rebindHTTPServer(listenAddr); err != nil {
+			return fmt.Errorf("rebind agent HTTP server: %w", err)
+		}
 	}
 
 	s.reloadConfigServices(cfg)
@@ -485,7 +495,8 @@ func (s *Server) rebindHTTPServer(addr string) error {
 	s.mu.Unlock()
 
 	s.serveHTTPServer(newSrv, ln, errCh)
-	log.Printf("agent: nodeAttrs overriding listen port to %s", addr)
+	s.reg.touchServices()
+	log.Printf("agent: HTTP listen address changed to %s", addr)
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -878,14 +889,16 @@ func (s *Server) addStatic(name string, targets []string, labels map[string]stri
 }
 
 // saveConfig persists cfg to the configured config file.
-// Errors are logged but not returned — a failed save should not break the operation.
-func (s *Server) saveConfig(cfg config.AgentConfig) {
+// It returns persistence errors so management callers can report them.
+func (s *Server) saveConfig(cfg config.AgentConfig) error {
 	if s.cfgFile == "" {
-		return
+		return nil
 	}
 	if err := config.SaveAgentConfig(s.cfgFile, cfg); err != nil {
 		log.Printf("agent: failed to save config: %v", err)
+		return err
 	}
+	return nil
 }
 
 // filterSlice returns a new slice containing only elements for which keep returns true.

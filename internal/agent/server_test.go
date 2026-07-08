@@ -381,11 +381,32 @@ func TestFilterSlice(t *testing.T) {
 func TestRebindHTTPServerMovesListener(t *testing.T) {
 	oldAddr := freeTCPAddr(t)
 	s := newTestServer(config.AgentConfig{Server: config.AgentServer{Listen: oldAddr}})
+	s.mu.Lock()
+	s.tsIPv4 = "127.0.0.1"
+	s.mu.Unlock()
+	if err := s.addBucket("bucket", nil, nil); err != nil {
+		t.Fatalf("addBucket: %v", err)
+	}
+
 	errCh := make(chan error, 1)
 	if err := s.startHTTPServer(oldAddr, errCh); err != nil {
 		t.Fatalf("startHTTPServer: %v", err)
 	}
 	defer s.Shutdown(context.Background())
+
+	client := &http.Client{Timeout: time.Second}
+	oldResp, err := client.Get("http://" + oldAddr + "/api/v1/services")
+	if err != nil {
+		t.Fatalf("GET old listener: %v", err)
+	}
+	oldLM := oldResp.Header.Get("Last-Modified")
+	oldTarget := decodeOnlyServiceTarget(t, oldResp)
+	if oldTarget != oldAddr {
+		t.Fatalf("old target = %q, want %q", oldTarget, oldAddr)
+	}
+	if oldLM == "" {
+		t.Fatal("old response missing Last-Modified")
+	}
 
 	newAddr := freeTCPAddr(t)
 	if err := s.rebindHTTPServer(newAddr); err != nil {
@@ -403,14 +424,21 @@ func TestRebindHTTPServerMovesListener(t *testing.T) {
 		t.Fatalf("http server addr = %q, want %q", gotSrvAddr, newAddr)
 	}
 
-	client := &http.Client{Timeout: time.Second}
-	resp, err := client.Get("http://" + newAddr + "/api/v1/services")
+	req, err := http.NewRequest(http.MethodGet, "http://"+newAddr+"/api/v1/services", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("If-Modified-Since", oldLM)
+	newResp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("GET new listener: %v", err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("new listener status = %d, want 200", resp.StatusCode)
+	newTarget := decodeOnlyServiceTarget(t, newResp)
+	if newResp.StatusCode != http.StatusOK {
+		t.Fatalf("new listener status = %d, want 200", newResp.StatusCode)
+	}
+	if newTarget != newAddr {
+		t.Fatalf("new target = %q, want %q", newTarget, newAddr)
 	}
 }
 
@@ -456,6 +484,19 @@ func TestRebindHTTPServerKeepsOldListenerWhenNewListenFails(t *testing.T) {
 	}
 }
 
+func TestMgmtServiceAddReturnsErrorWhenSaveFails(t *testing.T) {
+	s := newTestServer(config.AgentConfig{})
+	s.cfgFile = t.TempDir()
+	mgmt := newMgmtServer(s)
+	body := `{"name":"svc","targets":["host:9100"]}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mgmt/service/add", strings.NewReader(body))
+	mgmt.Handler.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.Code)
+	}
+}
+
 func freeTCPAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -467,4 +508,20 @@ func freeTCPAddr(t *testing.T) string {
 		t.Fatalf("close free TCP addr listener: %v", err)
 	}
 	return addr
+}
+
+func decodeOnlyServiceTarget(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	defer resp.Body.Close()
+	var entries []protocol.ServiceEntry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode services: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("service entries len = %d, want 1", len(entries))
+	}
+	if len(entries[0].Target.Targets) != 1 {
+		t.Fatalf("targets len = %d, want 1", len(entries[0].Target.Targets))
+	}
+	return entries[0].Target.Targets[0]
 }

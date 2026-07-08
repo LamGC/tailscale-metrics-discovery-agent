@@ -111,6 +111,16 @@ func TestRegistry_SvcModifiedAt_OnAddRemove(t *testing.T) {
 	}
 }
 
+func TestRegistry_TouchServices(t *testing.T) {
+	r := newRegistry()
+	t0 := r.SvcLastModified()
+	r.touchServices()
+	t1 := r.SvcLastModified()
+	if !t1.After(t0) {
+		t.Fatalf("SvcLastModified did not advance after touch: %v <= %v", t1, t0)
+	}
+}
+
 func TestRegistry_HealthModifiedAt_OnChange(t *testing.T) {
 	r := newRegistry()
 	_ = r.add(protocol.ServiceEntry{Name: "svc", Type: protocol.ServiceTypeStatic})
