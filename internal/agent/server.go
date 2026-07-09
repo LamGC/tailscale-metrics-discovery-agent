@@ -34,6 +34,7 @@ import (
 //   - GET  /proxy/<name>/metrics     — proxy-scrape local target
 type Server struct {
 	mu           sync.RWMutex
+	mgmtMu       sync.Mutex
 	cfg          config.AgentConfig
 	cfgFile      string
 	reg          *registry
@@ -67,6 +68,8 @@ type clientAccess struct {
 }
 
 // NewServer creates a new Agent Server from the given config.
+var readSelfNodeAttrs = tsutil.ReadSelfNodeAttrs
+
 func NewServer(cfg config.AgentConfig) *Server {
 	s := &Server{
 		cfg:         cfg,
@@ -236,34 +239,21 @@ func (s *Server) clientAccessList() []protocol.ClientAccessInfo {
 //
 // On error, the previous values are retained. Safe for concurrent use.
 func (s *Server) LoadNodeAttrs(ctx context.Context) {
-	attrs, err := tsutil.ReadSelfNodeAttrs(ctx, &s.lc)
-	if err != nil {
-		log.Printf("agent: failed to read nodeAttrs: %v (retaining previous)", err)
-		return
-	}
+	s.mu.RLock()
+	cfg := s.cfg
+	s.mu.RUnlock()
+
+	nextCfg, allowedTags := s.configWithNodeAttrs(ctx, cfg)
 
 	var newListen string
 	s.mu.Lock()
-	if attrs == nil {
-		s.allowedCTags = nil
-		s.mu.Unlock()
-		return
-	}
-	if len(attrs.CentralTags) > 0 {
-		s.allowedCTags = attrs.CentralTags
-		log.Printf("agent: ACL-based auth enabled, allowed central tags: %v", attrs.CentralTags)
-	} else {
-		s.allowedCTags = nil
-	}
-	if attrs.AgentPort > 0 {
-		candidate := fmt.Sprintf(":%d", attrs.AgentPort)
-		if s.cfg.Server.Listen != candidate {
-			if s.httpSrv == nil {
-				log.Printf("agent: nodeAttrs overriding listen port to %s", candidate)
-				s.cfg.Server.Listen = candidate
-			} else {
-				newListen = candidate
-			}
+	s.allowedCTags = allowedTags
+	if s.cfg.Server.Listen != nextCfg.Server.Listen {
+		if s.httpSrv == nil {
+			log.Printf("agent: nodeAttrs overriding listen port to %s", nextCfg.Server.Listen)
+			s.cfg.Server.Listen = nextCfg.Server.Listen
+		} else {
+			newListen = nextCfg.Server.Listen
 		}
 	}
 	s.mu.Unlock()
@@ -274,6 +264,34 @@ func (s *Server) LoadNodeAttrs(ctx context.Context) {
 	if err := s.rebindHTTPServer(newListen); err != nil {
 		log.Printf("agent: nodeAttrs listen port update to %s failed: %v", newListen, err)
 	}
+}
+
+func (s *Server) configWithNodeAttrs(ctx context.Context, cfg config.AgentConfig) (config.AgentConfig, []string) {
+	if !cfg.Server.NodeAttrs {
+		return cfg, nil
+	}
+	attrs, err := readSelfNodeAttrs(ctx, &s.lc)
+	if err != nil {
+		log.Printf("agent: failed to read nodeAttrs: %v (retaining previous)", err)
+		s.mu.RLock()
+		cfg.Server.Listen = s.cfg.Server.Listen
+		allowedTags := append([]string(nil), s.allowedCTags...)
+		s.mu.RUnlock()
+		return cfg, allowedTags
+	}
+	if attrs == nil {
+		return cfg, nil
+	}
+
+	var allowedTags []string
+	if len(attrs.CentralTags) > 0 {
+		allowedTags = append([]string(nil), attrs.CentralTags...)
+		log.Printf("agent: ACL-based auth enabled, allowed central tags: %v", attrs.CentralTags)
+	}
+	if attrs.AgentPort > 0 {
+		cfg.Server.Listen = fmt.Sprintf(":%d", attrs.AgentPort)
+	}
+	return cfg, allowedTags
 }
 
 // ClearNodeAttrs removes ACL tag auth config (used when node_attrs is disabled).
@@ -289,32 +307,29 @@ func (s *Server) Reload() error {
 	if s.cfgFile == "" {
 		return nil
 	}
+	s.mgmtMu.Lock()
+	defer s.mgmtMu.Unlock()
 	cfg, err := config.LoadAgentConfig(s.cfgFile)
 	if err != nil {
 		return fmt.Errorf("reload agent config: %w", err)
 	}
-	s.mu.Lock()
-	s.cfg = cfg
+	nextCfg, allowedTags := s.configWithNodeAttrs(context.Background(), cfg)
+
+	s.mu.RLock()
 	running := s.httpSrv != nil
-	s.mu.Unlock()
-
-	// Handle node_attrs toggle on reload.
-	if cfg.Server.NodeAttrs {
-		s.LoadNodeAttrs(context.Background())
-	} else {
-		s.ClearNodeAttrs()
-	}
-
+	s.mu.RUnlock()
 	if running {
-		s.mu.RLock()
-		listenAddr := s.cfg.Server.Listen
-		s.mu.RUnlock()
-		if err := s.rebindHTTPServer(listenAddr); err != nil {
+		if err := s.rebindHTTPServer(nextCfg.Server.Listen); err != nil {
 			return fmt.Errorf("rebind agent HTTP server: %w", err)
 		}
 	}
 
-	s.reloadConfigServices(cfg)
+	s.mu.Lock()
+	s.cfg = nextCfg
+	s.allowedCTags = allowedTags
+	s.mu.Unlock()
+
+	s.reloadConfigServices(nextCfg)
 	log.Printf("agent: config reloaded from %s", s.cfgFile)
 	return nil
 }
@@ -322,12 +337,25 @@ func (s *Server) Reload() error {
 // reloadConfigServices removes all registered services and re-adds them from cfg.
 // Since CLI adds are persisted to the config file, cfg is the single source of truth.
 func (s *Server) reloadConfigServices(cfg config.AgentConfig) {
+	desiredBuckets := make(map[string]config.BucketService, len(cfg.Buckets))
+	bucketOrder := make([]string, 0, len(cfg.Buckets))
+	for _, bc := range cfg.Buckets {
+		if _, ok := desiredBuckets[bc.Name]; ok {
+			log.Printf("agent: reload bucket %q: duplicate config entry ignored", bc.Name)
+			continue
+		}
+		desiredBuckets[bc.Name] = bc
+		bucketOrder = append(bucketOrder, bc.Name)
+	}
+
 	for _, e := range s.reg.list() {
 		switch e.Type {
 		case protocol.ServiceTypeStatic:
 			_ = s.removeStatic(e.Name)
 		case protocol.ServiceTypeBucket:
-			_ = s.removeBucket(e.Name)
+			if _, ok := desiredBuckets[e.Name]; !ok {
+				_ = s.removeBucket(e.Name)
+			}
 		case protocol.ServiceTypeProxy:
 			_ = s.removeProxy(e.Name)
 		}
@@ -337,9 +365,16 @@ func (s *Server) reloadConfigServices(cfg config.AgentConfig) {
 			log.Printf("agent: reload static %q: %v", st.Name, err)
 		}
 	}
-	for _, bc := range cfg.Buckets {
-		if err := s.addBucket(bc.Name, bc.Labels, bc.Healthcheck); err != nil {
-			log.Printf("agent: reload bucket %q: %v", bc.Name, err)
+	for _, name := range bucketOrder {
+		bc := desiredBuckets[name]
+		if _, ok := s.buckets.get(name); ok {
+			if err := s.updateBucket(name, bc.Labels, bc.Healthcheck); err != nil {
+				log.Printf("agent: reload bucket %q: %v", name, err)
+			}
+			continue
+		}
+		if err := s.addBucket(name, bc.Labels, bc.Healthcheck); err != nil {
+			log.Printf("agent: reload bucket %q: %v", name, err)
 		}
 	}
 	for _, pc := range cfg.Proxies {
@@ -464,6 +499,11 @@ func (s *Server) rebindHTTPServer(addr string) error {
 	}
 	if oldSrv.Addr == addr {
 		s.mu.RUnlock()
+		s.mu.Lock()
+		if s.httpSrv == oldSrv {
+			s.cfg.Server.Listen = addr
+		}
+		s.mu.Unlock()
 		return nil
 	}
 	errCh := s.httpErrCh
@@ -802,12 +842,34 @@ func (s *Server) addBucket(name string, labels map[string]string, hcCfg *config.
 	if err := s.buckets.add(name, b); err != nil {
 		return err
 	}
+	entry := bucketServiceEntry(name, labels)
+	if err := s.reg.add(entry); err != nil {
+		_ = s.buckets.remove(name)
+		return fmt.Errorf("registering bucket %q: %w", name, err)
+	}
+	s.hc.Register(name, hcCfg)
+	return nil
+}
+
+func (s *Server) updateBucket(name string, labels map[string]string, hcCfg *config.HealthcheckConfig) error {
+	if _, ok := s.buckets.get(name); !ok {
+		return fmt.Errorf("bucket %q not found", name)
+	}
+	if err := s.reg.update(bucketServiceEntry(name, labels)); err != nil {
+		return err
+	}
+	s.hc.Unregister(name)
+	s.hc.Register(name, hcCfg)
+	return nil
+}
+
+func bucketServiceEntry(name string, labels map[string]string) protocol.ServiceEntry {
 	lbs := map[string]string{}
 	maps.Copy(lbs, labels)
 	lbs["__tsd_service_name"] = name
 	lbs["__tsd_service_type"] = "bucket"
 	lbs["__metrics_path__"] = "/bucket/" + name + "/metrics"
-	entry := protocol.ServiceEntry{
+	return protocol.ServiceEntry{
 		Name: name,
 		Type: protocol.ServiceTypeBucket,
 		Target: protocol.SDTarget{
@@ -815,12 +877,6 @@ func (s *Server) addBucket(name string, labels map[string]string, hcCfg *config.
 			Labels:  lbs,
 		},
 	}
-	if err := s.reg.add(entry); err != nil {
-		_ = s.buckets.remove(name)
-		return fmt.Errorf("registering bucket %q: %w", name, err)
-	}
-	s.hc.Register(name, hcCfg)
-	return nil
 }
 
 // removeBucket removes a bucket and its registry entry.

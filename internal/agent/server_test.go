@@ -3,15 +3,20 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"tailscale.com/client/local"
+
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/config"
 	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/protocol"
+	"github.com/LamGC/tailscale-metrics-discovery-agent/internal/tsutil"
 )
 
 // newTestServer returns a Server without a running HTTP listener, suitable for
@@ -442,6 +447,31 @@ func TestRebindHTTPServerMovesListener(t *testing.T) {
 	}
 }
 
+func TestRebindHTTPServerSameAddressSyncsConfigListen(t *testing.T) {
+	addr := freeTCPAddr(t)
+	s := newTestServer(config.AgentConfig{Server: config.AgentServer{Listen: addr}})
+	errCh := make(chan error, 1)
+	if err := s.startHTTPServer(addr, errCh); err != nil {
+		t.Fatalf("startHTTPServer: %v", err)
+	}
+	defer s.Shutdown(context.Background())
+
+	s.mu.Lock()
+	s.cfg.Server.Listen = ":9001"
+	s.mu.Unlock()
+
+	if err := s.rebindHTTPServer(addr); err != nil {
+		t.Fatalf("rebindHTTPServer: %v", err)
+	}
+
+	s.mu.RLock()
+	got := s.cfg.Server.Listen
+	s.mu.RUnlock()
+	if got != addr {
+		t.Fatalf("config listen = %q, want %q", got, addr)
+	}
+}
+
 func TestRebindHTTPServerKeepsOldListenerWhenNewListenFails(t *testing.T) {
 	oldAddr := freeTCPAddr(t)
 	s := newTestServer(config.AgentConfig{Server: config.AgentServer{Listen: oldAddr}})
@@ -524,4 +554,161 @@ func decodeOnlyServiceTarget(t *testing.T, resp *http.Response) string {
 		t.Fatalf("targets len = %d, want 1", len(entries[0].Target.Targets))
 	}
 	return entries[0].Target.Targets[0]
+}
+
+func TestHandlePush_BucketsIsolateSameJob(t *testing.T) {
+	s := newTestServer(config.AgentConfig{})
+	if err := s.addBucket("a", nil, nil); err != nil {
+		t.Fatalf("add bucket a: %v", err)
+	}
+	if err := s.addBucket("b", nil, nil); err != nil {
+		t.Fatalf("add bucket b: %v", err)
+	}
+
+	for _, tc := range []struct {
+		bucket string
+		body   string
+	}{
+		{bucket: "a", body: "shared_metric 1\n"},
+		{bucket: "b", body: "shared_metric 2\n"},
+	} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/push/"+tc.bucket+"/job/same", strings.NewReader(tc.body))
+		s.mux.ServeHTTP(w, req)
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("push bucket %s status = %d, want 202", tc.bucket, w.Code)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/bucket/a/metrics", nil))
+	bodyA := w.Body.String()
+	if !strings.Contains(bodyA, `shared_metric{job="same"} 1`) || strings.Contains(bodyA, `shared_metric{job="same"} 2`) {
+		t.Fatalf("bucket a not isolated; body:\n%s", bodyA)
+	}
+
+	w = httptest.NewRecorder()
+	s.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/bucket/b/metrics", nil))
+	bodyB := w.Body.String()
+	if !strings.Contains(bodyB, `shared_metric{job="same"} 2`) || strings.Contains(bodyB, `shared_metric{job="same"} 1`) {
+		t.Fatalf("bucket b not isolated; body:\n%s", bodyB)
+	}
+}
+
+func TestReloadKeepsOldConfigWhenRebindFails(t *testing.T) {
+	oldAddr := freeTCPAddr(t)
+	cfgPath := filepath.Join(t.TempDir(), "agent.toml")
+	initial := config.AgentConfig{Server: config.AgentServer{Listen: oldAddr, NodeAttrs: false}}
+	if err := config.SaveAgentConfig(cfgPath, initial); err != nil {
+		t.Fatalf("save initial config: %v", err)
+	}
+
+	s := newTestServer(initial)
+	s.cfgFile = cfgPath
+	errCh := make(chan error, 1)
+	if err := s.startHTTPServer(oldAddr, errCh); err != nil {
+		t.Fatalf("startHTTPServer: %v", err)
+	}
+	defer s.Shutdown(context.Background())
+
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen busy port: %v", err)
+	}
+	defer busy.Close()
+	newCfg := initial
+	newCfg.Server.Listen = busy.Addr().String()
+	if err := config.SaveAgentConfig(cfgPath, newCfg); err != nil {
+		t.Fatalf("save new config: %v", err)
+	}
+
+	if err := s.Reload(); err == nil {
+		t.Fatal("Reload unexpectedly succeeded with busy listen address")
+	}
+
+	s.mu.RLock()
+	gotListen := s.cfg.Server.Listen
+	gotSrvAddr := s.httpSrv.Addr
+	s.mu.RUnlock()
+	if gotListen != oldAddr {
+		t.Fatalf("cfg listen = %q, want old addr %q", gotListen, oldAddr)
+	}
+	if gotSrvAddr != oldAddr {
+		t.Fatalf("http server addr = %q, want old addr %q", gotSrvAddr, oldAddr)
+	}
+}
+
+func TestReloadPreservesBucketMetrics(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "agent.toml")
+	cfg := config.AgentConfig{
+		Server:  config.AgentServer{Listen: ":0", NodeAttrs: false},
+		Buckets: []config.BucketService{{Name: "jobs", Labels: map[string]string{"role": "batch"}}},
+	}
+	if err := config.SaveAgentConfig(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	s := newTestServer(cfg)
+	s.cfgFile = cfgPath
+	if err := s.addBucket("jobs", map[string]string{"role": "batch"}, nil); err != nil {
+		t.Fatalf("addBucket: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/push/jobs/job/nightly", strings.NewReader("batch_metric 7\n"))
+	s.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("push status = %d, want 202", w.Code)
+	}
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	w = httptest.NewRecorder()
+	s.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/bucket/jobs/metrics", nil))
+	if body := w.Body.String(); !strings.Contains(body, `batch_metric{job="nightly"} 7`) {
+		t.Fatalf("bucket metrics lost after reload; body:\n%s", body)
+	}
+}
+
+func TestReloadPreservesRuntimeNodeAttrsWhenReadFails(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "agent.toml")
+	fileCfg := config.AgentConfig{
+		Server: config.AgentServer{Listen: ":9001", Token: "new-token", NodeAttrs: true},
+	}
+	if err := config.SaveAgentConfig(cfgPath, fileCfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	runtimeCfg := fileCfg
+	runtimeCfg.Server.Listen = "127.0.0.1:12345"
+	runtimeCfg.Server.Token = "old-token"
+	s := newTestServer(runtimeCfg)
+	s.cfgFile = cfgPath
+	s.allowedCTags = []string{"tag:central"}
+
+	oldReadSelfNodeAttrs := readSelfNodeAttrs
+	readSelfNodeAttrs = func(context.Context, *local.Client) (*tsutil.TSDNodeAttrs, error) {
+		return nil, errors.New("tailscale unavailable")
+	}
+	t.Cleanup(func() { readSelfNodeAttrs = oldReadSelfNodeAttrs })
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	s.mu.RLock()
+	gotListen := s.cfg.Server.Listen
+	gotToken := s.cfg.Server.Token
+	gotTags := append([]string(nil), s.allowedCTags...)
+	s.mu.RUnlock()
+	if gotListen != runtimeCfg.Server.Listen {
+		t.Fatalf("listen = %q, want runtime listen %q", gotListen, runtimeCfg.Server.Listen)
+	}
+	if gotToken != fileCfg.Server.Token {
+		t.Fatalf("token = %q, want reloaded token %q", gotToken, fileCfg.Server.Token)
+	}
+	if len(gotTags) != 1 || gotTags[0] != "tag:central" {
+		t.Fatalf("allowed tags = %v, want previous tag", gotTags)
+	}
 }

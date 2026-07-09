@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"bytes"
+	"compress/gzip"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,16 +13,18 @@ import (
 
 func TestParseGroupKey(t *testing.T) {
 	cases := []struct {
-		input    string
-		wantJob  string
-		wantInst string
-		wantErr  bool
+		input      string
+		wantLabels map[string]string
+		wantErr    bool
 	}{
-		{"job/foo", "foo", "", false},
-		{"job/foo/instance/bar", "foo", "bar", false},
-		{"/job/foo/", "foo", "", false}, // leading/trailing slash stripped
-		{"nojob/foo", "", "", true},
-		{"", "", "", true},
+		{"job/foo", map[string]string{"job": "foo"}, false},
+		{"job/foo/instance/bar", map[string]string{"job": "foo", "instance": "bar"}, false},
+		{"job/foo/env/prod/region/us-east", map[string]string{"job": "foo", "env": "prod", "region": "us-east"}, false},
+		{"/job/foo/", map[string]string{"job": "foo"}, false},
+		{"job/foo/env", nil, true},
+		{"job/foo/env/prod/env/staging", nil, true},
+		{"nojob/foo", nil, true},
+		{"", nil, true},
 	}
 	for _, c := range cases {
 		key, err := parseGroupKey(c.input)
@@ -34,9 +38,13 @@ func TestParseGroupKey(t *testing.T) {
 			t.Errorf("parseGroupKey(%q): unexpected error: %v", c.input, err)
 			continue
 		}
-		if key.job != c.wantJob || key.instance != c.wantInst {
-			t.Errorf("parseGroupKey(%q) = {job:%q inst:%q}, want {job:%q inst:%q}",
-				c.input, key.job, key.instance, c.wantJob, c.wantInst)
+		for name, want := range c.wantLabels {
+			if got := key.labels[name]; got != want {
+				t.Errorf("parseGroupKey(%q) label %s = %q, want %q", c.input, name, got, want)
+			}
+		}
+		if len(key.labels) != len(c.wantLabels) {
+			t.Errorf("parseGroupKey(%q) labels = %v, want %v", c.input, key.labels, c.wantLabels)
 		}
 	}
 }
@@ -226,4 +234,116 @@ func dtoHasLabel(m *dto.Metric, name, value string) bool {
 		}
 	}
 	return false
+}
+
+func TestBucket_POSTMergesMetricFamilies(t *testing.T) {
+	b := newBucket("test")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/push/test/job/app", strings.NewReader("alpha 1\nbeta 1\n"))
+	b.push(w, req, "job/app")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("put status = %d, want 202", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/push/test/job/app", strings.NewReader("alpha 2\n"))
+	b.push(w, req, "job/app")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("post status = %d, want 202", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	b.serveMetrics(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := w.Body.String()
+	if !strings.Contains(body, `alpha{job="app"} 2`) {
+		t.Fatalf("POST did not replace alpha only; body:\n%s", body)
+	}
+	if !strings.Contains(body, `beta{job="app"} 1`) {
+		t.Fatalf("POST removed unrelated beta family; body:\n%s", body)
+	}
+	if strings.Contains(body, `alpha{job="app"} 1`) {
+		t.Fatalf("old alpha sample still present; body:\n%s", body)
+	}
+}
+
+func TestBucket_POSTEmptyDoesNotReplaceExistingGroup(t *testing.T) {
+	b := newBucket("test")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/push/test/job/app", strings.NewReader("alpha 1\n"))
+	b.push(w, req, "job/app")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("put status = %d, want 202", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/push/test/job/app", strings.NewReader(""))
+	b.push(w, req, "job/app")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("empty post status = %d, want 202", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	b.serveMetrics(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if body := w.Body.String(); !strings.Contains(body, `alpha{job="app"} 1`) {
+		t.Fatalf("empty POST changed group; body:\n%s", body)
+	}
+}
+
+func TestBucket_GroupingLabelsIsolateGroups(t *testing.T) {
+	b := newBucket("test")
+	for _, tc := range []struct {
+		rest string
+		body string
+	}{
+		{rest: "job/app/env/prod", body: "alpha 1\n"},
+		{rest: "job/app/env/staging", body: "alpha 2\n"},
+	} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/push/test/"+tc.rest, strings.NewReader(tc.body))
+		b.push(w, req, tc.rest)
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("push %s status = %d, want 202", tc.rest, w.Code)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	b.serveMetrics(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := w.Body.String()
+	if !strings.Contains(body, `alpha{job="app",env="prod"} 1`) {
+		t.Fatalf("missing prod group; body:\n%s", body)
+	}
+	if !strings.Contains(body, `alpha{job="app",env="staging"} 2`) {
+		t.Fatalf("missing staging group; body:\n%s", body)
+	}
+}
+
+func TestParsePushBody_Gzip(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write([]byte("alpha 1\n")); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/push", &buf)
+	req.Header.Set("Content-Encoding", "gzip")
+	families, err := parsePushBody(req)
+	if err != nil {
+		t.Fatalf("parsePushBody gzip: %v", err)
+	}
+	if _, ok := families["alpha"]; !ok {
+		t.Fatalf("alpha family missing: %v", families)
+	}
+}
+
+func TestParsePushBody_UnsupportedEncoding(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPut, "/push", strings.NewReader("alpha 1\n"))
+	req.Header.Set("Content-Encoding", "snappy")
+	if _, err := parsePushBody(req); err == nil {
+		t.Fatal("parsePushBody unexpectedly accepted unsupported encoding")
+	}
 }

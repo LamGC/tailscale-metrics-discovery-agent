@@ -65,6 +65,8 @@ func newMgmtServer(s *Server) *http.Server {
 			hcCfg = &config.HealthcheckConfig{URL: req.HealthcheckURL}
 		}
 
+		s.mgmtMu.Lock()
+		defer s.mgmtMu.Unlock()
 		s.mu.Lock()
 		oldCfg := cloneAgentConfig(s.cfg)
 		nextCfg := cloneAgentConfig(s.cfg)
@@ -106,6 +108,8 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.mgmtMu.Lock()
+		defer s.mgmtMu.Unlock()
 		s.mu.Lock()
 		oldCfg := cloneAgentConfig(s.cfg)
 		nextCfg := cloneAgentConfig(s.cfg)
@@ -148,6 +152,8 @@ func newMgmtServer(s *Server) *http.Server {
 		if req.HealthcheckURL != "" {
 			hcCfg = &config.HealthcheckConfig{URL: req.HealthcheckURL}
 		}
+		s.mgmtMu.Lock()
+		defer s.mgmtMu.Unlock()
 		s.mu.Lock()
 		oldCfg := cloneAgentConfig(s.cfg)
 		nextCfg := cloneAgentConfig(s.cfg)
@@ -188,6 +194,8 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.mgmtMu.Lock()
+		defer s.mgmtMu.Unlock()
 		s.mu.Lock()
 		oldCfg := cloneAgentConfig(s.cfg)
 		nextCfg := cloneAgentConfig(s.cfg)
@@ -277,6 +285,8 @@ func newMgmtServer(s *Server) *http.Server {
 		if req.HealthcheckURL != "" {
 			hcCfg = &config.HealthcheckConfig{URL: req.HealthcheckURL}
 		}
+		s.mgmtMu.Lock()
+		defer s.mgmtMu.Unlock()
 		s.mu.Lock()
 		oldCfg := cloneAgentConfig(s.cfg)
 		nextCfg := cloneAgentConfig(s.cfg)
@@ -319,6 +329,8 @@ func newMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.mgmtMu.Lock()
+		defer s.mgmtMu.Unlock()
 		s.mu.Lock()
 		oldCfg := cloneAgentConfig(s.cfg)
 		nextCfg := cloneAgentConfig(s.cfg)

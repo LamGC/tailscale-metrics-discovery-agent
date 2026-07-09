@@ -49,6 +49,17 @@ func (r *registry) remove(name string) error {
 	return nil
 }
 
+func (r *registry) update(e protocol.ServiceEntry) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.entries[e.Name]; !ok {
+		return fmt.Errorf("service %q not found", e.Name)
+	}
+	r.entries[e.Name] = new(e)
+	r.svcModifiedAt = nextModifiedAt(r.svcModifiedAt)
+	return nil
+}
+
 func (r *registry) get(name string) (protocol.ServiceEntry, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
