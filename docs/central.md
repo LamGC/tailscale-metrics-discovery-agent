@@ -169,7 +169,7 @@ curl http://localhost:9000/api/v1/sd
 
 ## 手动配置对端
 
-当某个 Agent 节点的端口与 `discovery.agent_port` 不同，或需要管理一个不在 ACL Tag 发现范围内的节点时，可以通过 CLI 手动添加对端。手动对端与 ACL 自动发现的对端并行工作：若同一 IP 同时出现在两处，手动配置的端口优先。
+当某个 Agent 节点的端口与 `discovery.agent_port` 不同，或需要管理一个不在 ACL Tag 发现范围内的节点时，可以通过 CLI 手动添加对端。手动对端与 ACL 自动发现的对端并行工作：若同一 Tailscale 节点（IP 或 MagicDNS 名称）同时出现在两处，手动配置的端口优先。
 
 ```bash
 # 添加手动对端（使用默认端口 9001）
@@ -185,7 +185,7 @@ tsd central peer list
 tsd central peer remove 100.64.0.11
 ```
 
-也可以在 `central.toml` 中静态配置，重启后生效：
+也可以在 `central.toml` 中静态配置：
 
 ```toml
 [[peer]]
@@ -194,7 +194,7 @@ address = "100.64.0.11"
 port    = 9002
 ```
 
-> **注意**：通过 CLI 动态添加的对端仅在当前 daemon 运行期间有效，重启后失效。生产环境建议写入配置文件。
+> **注意**：通过 CLI 动态添加的对端会先写入 Central 当前配置文件，再应用到运行时；如果 daemon 没有配置文件路径，则仅对当前运行时生效。
 
 ---
 

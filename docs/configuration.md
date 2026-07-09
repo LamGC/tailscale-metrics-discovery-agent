@@ -139,7 +139,7 @@ targets = ["10.0.0.5:9100"]
 
 # ── Push Bucket（可配置多个） ───────────────────────────────────────────────
 # 每个 Bucket 是一个独立的 Pushgateway 容器，拥有独立的 /metrics 端点。
-# Bucket 内部按标准 job/instance 分组，互不覆盖。
+# Bucket 是独立 namespace；内部按完整 Pushgateway grouping key 分组，互不覆盖。
 # Prometheus 抓取目标自动设为：<agent-tailscale-ip>:<port>/bucket/<name>/metrics
 [[bucket]]
 name = "my-app"
@@ -193,11 +193,11 @@ target = "http://localhost:8080/metrics"
 Bucket 启动后自动注册为一个 Prometheus 抓取目标（`/bucket/<name>/metrics`）。本地进程通过 Pushgateway 兼容 API 推送指标：
 
 ```
-PUT  /push/<bucket>/job/<job>[/instance/<instance>]
-POST /push/<bucket>/job/<job>[/instance/<instance>]
+PUT  /push/<bucket>/job/<job>{/<label>/<value>}
+POST /push/<bucket>/job/<job>{/<label>/<value>}
 ```
 
-同一 Bucket 内，不同 `job`/`instance` 组合的数据**互不覆盖**；相同组合的推送会**替换**上一次数据（与标准 Pushgateway 行为一致）。
+同一 Bucket 内，不同 grouping key 的数据**互不覆盖**；不同 Bucket 之间完全隔离，`job` 相同也不会冲突。`PUT` 会替换同一 grouping key 下全部指标；`POST` 只替换同名 metric family，保留其它 metric family（与标准 Pushgateway 行为一致）。
 
 #### `[[proxy]]` — Proxy 端点
 

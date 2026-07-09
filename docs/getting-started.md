@@ -229,7 +229,7 @@ tsd central peer list
 tsd central peer remove 100.64.0.20
 ```
 
-> **注意**：CLI 动态添加的对端仅在当前 daemon 运行期间有效，重启后失效。
+> **注意**：CLI 动态添加的对端会先写入 Central 当前配置文件，再应用到运行时；如果 daemon 没有配置文件路径，则仅对当前运行时生效。
 
 ### 2.2 在配置文件中静态声明对端
 
@@ -420,7 +420,7 @@ Agent daemon 未启动，或防火墙阻断了 Central 到 Agent 9001 端口的�
 
 **Q：手动添加的对端重启 Central 后消失了？**
 
-CLI 动态添加（`tsd central peer add`）只在当前 daemon 生命周期内有效。生产环境请将对端写入 `central.toml` 的 `[[peer]]` 节。
+CLI 动态添加（`tsd central peer add`）现在会持久化到 Central 当前配置文件；请确认 daemon 使用了可写的 `central.toml`。
 
 **Q：想让 Prometheus 也监控 tsd 自身的运行状态？**
 

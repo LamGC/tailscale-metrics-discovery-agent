@@ -76,7 +76,7 @@ tsd agent service remove node-exporter
 
 ## 管理 Push Bucket
 
-Push Bucket 是命名式的 Pushgateway 容器。每个 Bucket 独立存储推送数据，自动成为一个 Prometheus 抓取目标（`/bucket/<name>/metrics`）。
+Push Bucket 是命名式的 Pushgateway 容器。每个 Bucket 是独立的 tsd namespace，独立存储推送数据，自动成为一个 Prometheus 抓取目标（`/bucket/<name>/metrics`）。不同 Bucket 内即使 `job` 与其它 grouping labels 完全相同，也互不覆盖。
 
 ### 创建 Bucket
 
@@ -106,11 +106,15 @@ curl -X PUT http://localhost:9001/push/my-app/job/worker/instance/host-1 \
 curl -X PUT http://localhost:9001/push/my-app/job/worker/instance/host-2 \
   --data-binary 'completed_tasks_total 18'
 
-# 删除某个 job/instance 组
+# 带任意 grouping label（同一 Bucket 内按完整 grouping key 隔离）
+curl -X PUT http://localhost:9001/push/my-app/job/worker/env/prod/region/us-east \
+  --data-binary 'completed_tasks_total 60'
+
+# 删除某个 grouping key
 curl -X DELETE http://localhost:9001/push/my-app/job/worker/instance/host-1
 ```
 
-同一 Bucket 内，相同 `job`/`instance` 的推送会**替换**上一次数据；不同 `job`/`instance` 互不干扰。
+同一 Bucket 内按 Pushgateway grouping key（`job/<job>{/<label>/<value>}`）隔离数据。`PUT` 会替换该 grouping key 下的全部指标；`POST` 只替换同名 metric family，保留其它 metric family。
 
 ### 查看 Bucket 当前指标
 
@@ -267,6 +271,6 @@ Agent 支持通过 Tailscale ACL `nodeAttrs` 自动验证请求方身份（基�
 | 操作方式 | 持久化 | 说明 |
 |----------|--------|------|
 | 配置文件（`agent.toml`） | 是，重启后生效 | `[[static]]`、`[[bucket]]`、`[[proxy]]` 节 |
-| CLI（`tsd agent service/bucket/proxy add`） | 否，仅当前 daemon 生命周期内有效 | 通过管理 socket 动态修改运行时状态 |
+| CLI（`tsd agent service/bucket/proxy add/remove`） | 是（daemon 有配置文件时） | 通过管理 socket 先写入配置文件，再修改运行时状态 |
 
-**最佳实践**：生产环境使用配置文件声明固定服务；临时调试或动态管理使用 CLI。
+**最佳实践**：生产环境可使用配置文件声明固定服务；CLI 适合动态管理，并会在当前配置文件可写时持久化。
