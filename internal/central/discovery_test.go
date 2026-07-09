@@ -32,3 +32,14 @@ func TestDiscoverer_PortConcurrent(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestTailscaleNodeNamePrefersDNSName(t *testing.T) {
+	got := tailscaleNodeName("agent.tailnet.ts.net", "machine-host")
+	if got != "agent.tailnet.ts.net" {
+		t.Fatalf("node name = %q, want DNSName", got)
+	}
+	got = tailscaleNodeName("", "machine-host")
+	if got != "machine-host" {
+		t.Fatalf("fallback node name = %q, want machine hostname", got)
+	}
+}

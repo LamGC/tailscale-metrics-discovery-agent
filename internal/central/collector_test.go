@@ -208,6 +208,28 @@ func TestQueryAgentServices_DoesNotSendConditionalWithoutServiceCache(t *testing
 	}
 }
 
+func TestInheritCachedHealth(t *testing.T) {
+	c := newTestCollector()
+	ip := "100.1.1.1"
+	health := &protocol.ServiceHealthStatus{Status: protocol.ServiceHealthHealthy, CheckURL: "http://check"}
+	c.cacheMu.Lock()
+	c.serviceCache[ip] = cachedPeerServices{services: []protocol.ServiceEntry{
+		{Name: "svc", Health: health},
+		{Name: "other", Health: &protocol.ServiceHealthStatus{Status: protocol.ServiceHealthUnhealthy}},
+	}}
+	c.cacheMu.Unlock()
+
+	services := []protocol.ServiceEntry{{Name: "svc"}, {Name: "new"}}
+	c.inheritCachedHealth(ip, services)
+
+	if services[0].Health != health {
+		t.Fatalf("cached health was not inherited: got %#v want %#v", services[0].Health, health)
+	}
+	if services[1].Health != nil {
+		t.Fatalf("new service unexpectedly inherited health: %#v", services[1].Health)
+	}
+}
+
 func TestEvictExpiredServiceCacheClearsConditionalState(t *testing.T) {
 	c := newTestCollector()
 	ip := "100.1.1.1"
@@ -544,5 +566,50 @@ func TestRemoveManualPeer_NotFound(t *testing.T) {
 	c := newTestCollector()
 	if c.RemoveManualPeer("10.0.0.99") {
 		t.Error("RemoveManualPeer: expected false for non-existent peer")
+	}
+}
+
+func TestMergePeersManualMagicDNSOverridesAutoPeer(t *testing.T) {
+	c := newTestCollector()
+	c.discoverer.UpdateConfig([]string{"tag:test"}, 9001)
+	c.AddManualPeer(manualPeer{Address: "agent.tailnet.ts.net", Port: 9100})
+
+	peers := c.mergePeers([]protocol.PeerInfo{{
+		Hostname:    "agent.tailnet.ts.net",
+		DNSName:     "agent.tailnet.ts.net",
+		TailscaleIP: "100.64.0.10",
+		AgentURL:    "http://100.64.0.10:9001",
+		Source:      protocol.PeerSourceAuto,
+		Health:      protocol.AgentHealthUnknown,
+	}})
+	if len(peers) != 1 {
+		t.Fatalf("peers = %d, want 1: %+v", len(peers), peers)
+	}
+	if peers[0].AgentURL != "http://agent.tailnet.ts.net:9100" {
+		t.Fatalf("agent url = %q, want manual override", peers[0].AgentURL)
+	}
+	if peers[0].Source != protocol.PeerSourceAuto {
+		t.Fatalf("source = %q, want auto peer retained", peers[0].Source)
+	}
+}
+
+func TestMergePeersManualShortMagicDNSOverridesAutoPeer(t *testing.T) {
+	c := newTestCollector()
+	c.discoverer.UpdateConfig([]string{"tag:test"}, 9001)
+	c.AddManualPeer(manualPeer{Address: "agent", Port: 9100})
+
+	peers := c.mergePeers([]protocol.PeerInfo{{
+		Hostname:    "agent.tailnet.ts.net",
+		DNSName:     "agent.tailnet.ts.net",
+		TailscaleIP: "100.64.0.10",
+		AgentURL:    "http://100.64.0.10:9001",
+		Source:      protocol.PeerSourceAuto,
+		Health:      protocol.AgentHealthUnknown,
+	}})
+	if len(peers) != 1 {
+		t.Fatalf("peers = %d, want 1: %+v", len(peers), peers)
+	}
+	if peers[0].AgentURL != "http://agent:9100" {
+		t.Fatalf("agent url = %q, want short manual override", peers[0].AgentURL)
 	}
 }

@@ -107,6 +107,8 @@ func newCentralMgmtServer(s *Server) *http.Server {
 			http.Error(w, "port must be 0-65535", http.StatusBadRequest)
 			return
 		}
+		s.mgmtMu.Lock()
+		defer s.mgmtMu.Unlock()
 		nextCfg := func() config.CentralConfig {
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -146,6 +148,8 @@ func newCentralMgmtServer(s *Server) *http.Server {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.mgmtMu.Lock()
+		defer s.mgmtMu.Unlock()
 		s.mu.Lock()
 		oldCfg := cloneCentralConfig(s.cfg)
 		nextCfg := cloneCentralConfig(s.cfg)

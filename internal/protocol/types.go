@@ -27,7 +27,7 @@ const (
 type ServiceHealth string
 
 const (
-	ServiceHealthUnknown   ServiceHealth = "unknown"   // check configured, not yet run
+	ServiceHealthUnknown   ServiceHealth = "unknown" // check configured, not yet run
 	ServiceHealthHealthy   ServiceHealth = "healthy"
 	ServiceHealthUnhealthy ServiceHealth = "unhealthy"
 )
@@ -107,12 +107,13 @@ const (
 // PeerInfo describes a peer running an Agent.
 type PeerInfo struct {
 	Hostname          string         `json:"hostname"`
+	DNSName           string         `json:"dns_name,omitempty"`
 	TailscaleIP       string         `json:"tailscale_ip"`
 	Tags              []string       `json:"tags"`
 	AgentURL          string         `json:"agent_url"`
 	Source            PeerSource     `json:"source"`
 	Health            AgentHealth    `json:"health"`
-	Services          []ServiceEntry `json:"services,omitempty"`           // from last successful query
+	Services          []ServiceEntry `json:"services,omitempty"`            // from last successful query
 	ServicesUpdatedAt *time.Time     `json:"services_updated_at,omitempty"` // when Services was last fetched
 }
 

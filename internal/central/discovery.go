@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/netip"
+	"strings"
 	"sync"
 
 	"tailscale.com/client/local"
@@ -132,8 +133,10 @@ func (d *discoverer) Discover(ctx context.Context) ([]protocol.PeerInfo, error) 
 		if tsIP == "" {
 			continue
 		}
+		dnsName := strings.TrimSuffix(peer.DNSName, ".")
 		info := protocol.PeerInfo{
-			Hostname:    peer.HostName,
+			Hostname:    tailscaleNodeName(dnsName, peer.HostName),
+			DNSName:     dnsName,
 			TailscaleIP: tsIP,
 			Tags:        matched,
 			Source:      protocol.PeerSourceAuto,
@@ -147,6 +150,13 @@ func (d *discoverer) Discover(ctx context.Context) ([]protocol.PeerInfo, error) 
 		peers = append(peers, info)
 	}
 	return peers, nil
+}
+
+func tailscaleNodeName(dnsName, hostName string) string {
+	if dnsName != "" {
+		return dnsName
+	}
+	return hostName
 }
 
 // Watch listens on the Tailscale IPN bus and calls onchange whenever the

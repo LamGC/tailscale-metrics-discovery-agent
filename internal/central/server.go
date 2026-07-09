@@ -23,6 +23,7 @@ import (
 //   - GET /api/v1/sd   — Prometheus http_sd endpoint
 type Server struct {
 	mu          sync.RWMutex
+	mgmtMu      sync.Mutex
 	cfg         config.CentralConfig
 	cfgFile     string
 	col         *collector
@@ -102,12 +103,14 @@ func (s *Server) Reload() error {
 	if s.cfgFile == "" {
 		return nil
 	}
+	s.mgmtMu.Lock()
+	defer s.mgmtMu.Unlock()
 	cfg, err := config.LoadCentralConfig(s.cfgFile)
 	if err != nil {
 		return fmt.Errorf("reload central config: %w", err)
 	}
 	s.mu.Lock()
-	s.cfg.Server.Token = cfg.Server.Token
+	s.cfg = cfg
 	s.mu.Unlock()
 
 	s.col.UpdateAgentToken(cfg.Discovery.AgentToken)

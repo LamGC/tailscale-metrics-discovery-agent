@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -438,14 +439,16 @@ func (c *collector) refresh(ctx context.Context) {
 				services = r.services
 			}
 
-			// 2. Merge health: on 200, overlay fresh health onto services.
-			//    On 304, cached services already have the previously merged health.
+			// 2. Merge health: on health 200, overlay fresh health onto services.
+			//    If only health is 304, inherit cached health by service name.
 			if !r.health304 && r.healthMap != nil {
 				for i := range services {
 					if h, ok := r.healthMap[services[i].Name]; ok {
 						services[i].Health = h
 					}
 				}
+			} else if r.health304 && !r.svc304 {
+				c.inheritCachedHealth(ip, services)
 			}
 
 			// 3. Update cache with merged result.
@@ -485,6 +488,30 @@ func (c *collector) refresh(ctx context.Context) {
 
 	// Persist the updated service cache to disk for fast startup next time.
 	go c.savePeerCache()
+}
+
+func (c *collector) inheritCachedHealth(ip string, services []protocol.ServiceEntry) {
+	c.cacheMu.RLock()
+	cached, ok := c.serviceCache[ip]
+	c.cacheMu.RUnlock()
+	if !ok || len(cached.services) == 0 {
+		return
+	}
+
+	healthByName := make(map[string]*protocol.ServiceHealthStatus, len(cached.services))
+	for _, svc := range cached.services {
+		if svc.Health != nil {
+			healthByName[svc.Name] = svc.Health
+		}
+	}
+	for i := range services {
+		if services[i].Health != nil {
+			continue
+		}
+		if h, ok := healthByName[services[i].Name]; ok {
+			services[i].Health = h
+		}
+	}
 }
 
 func (c *collector) hasServiceCache(ip string) bool {
@@ -661,7 +688,7 @@ func worseHealth(a, b protocol.AgentHealth) protocol.AgentHealth {
 }
 
 // mergePeers combines auto-discovered peers with manually configured peers.
-// If the same address appears in both, the manual entry's port takes precedence.
+// If the same Tailscale node appears in both, the manual entry's port takes precedence.
 func (c *collector) mergePeers(auto []protocol.PeerInfo) []protocol.PeerInfo {
 	c.manualMu.RLock()
 	defer c.manualMu.RUnlock()
@@ -670,7 +697,9 @@ func (c *collector) mergePeers(auto []protocol.PeerInfo) []protocol.PeerInfo {
 	copy(result, auto)
 	autoIdx := make(map[string]int, len(auto))
 	for i, p := range result {
-		autoIdx[p.TailscaleIP] = i
+		for _, key := range peerMatchKeys(p) {
+			autoIdx[key] = i
+		}
 	}
 
 	for _, mp := range c.manualPeers {
@@ -680,7 +709,7 @@ func (c *collector) mergePeers(auto []protocol.PeerInfo) []protocol.PeerInfo {
 		}
 		agentURL := fmt.Sprintf("http://%s:%d", mp.Address, port)
 
-		if idx, ok := autoIdx[mp.Address]; ok {
+		if idx, ok := autoIdx[normalizePeerAddress(mp.Address)]; ok {
 			// Override the port for an auto-discovered peer.
 			result[idx].AgentURL = agentURL
 		} else {
@@ -700,6 +729,37 @@ func (c *collector) mergePeers(auto []protocol.PeerInfo) []protocol.PeerInfo {
 		}
 	}
 	return result
+}
+
+func peerMatchKeys(p protocol.PeerInfo) []string {
+	candidates := []string{p.TailscaleIP, p.DNSName, p.Hostname, firstDNSLabel(p.DNSName), firstDNSLabel(p.Hostname)}
+	keys := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		key := normalizePeerAddress(candidate)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func normalizePeerAddress(address string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(address), "."))
+}
+
+func firstDNSLabel(name string) string {
+	normalized := normalizePeerAddress(name)
+	if normalized == "" || net.ParseIP(normalized) != nil {
+		return ""
+	}
+	label, _, _ := strings.Cut(normalized, ".")
+	return label
 }
 
 func isTimeoutError(err error) bool {
