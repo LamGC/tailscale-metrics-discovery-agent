@@ -18,14 +18,14 @@ var launchdTemplate string
 func platformInstall(cfg Config, init InitSystem) error {
 	// Build template data
 	role := string(cfg.Role)
-	data := templateData{
+	data := enrichTemplateData(templateData{
 		BinaryPath:  cfg.BinaryPath,
 		ConfigFile:  cfg.ConfigFile,
 		ServiceName: "tsd-" + role,
 		Role:        role,
 		Label:       "net.lamgc.tsd-" + role,
 		Description: "Tailscale Metrics Discovery — " + role,
-	}
+	}, cfg)
 
 	// Render template
 	tmpl, err := template.New("launchd").Parse(launchdTemplate)

@@ -2,7 +2,10 @@ package svcinstall
 
 import (
 	"fmt"
+	"html"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // Role represents the service role (agent or central).
@@ -34,13 +37,44 @@ type Config struct {
 
 // templateData holds variables for service template rendering.
 type templateData struct {
-	BinaryPath  string
-	ConfigFile  string
-	ServiceName string // "tsd-agent" or "tsd-central"
-	RcName      string // "tsd_agent" or "tsd_central"
-	Label       string // "net.lamgc.tsd-agent" etc (macOS)
-	Description string
-	Role        string
+	BinaryPath        string
+	ConfigFile        string
+	SystemdExecStart  string
+	ShellBinaryPath   string
+	ShellConfigFile   string
+	LaunchdBinaryPath string
+	LaunchdConfigFile string
+	ServiceName       string // "tsd-agent" or "tsd-central"
+	RcName            string // "tsd_agent" or "tsd_central"
+	Label             string // "net.lamgc.tsd-agent" etc (macOS)
+	Description       string
+	Role              string
+}
+
+func enrichTemplateData(data templateData, cfg Config) templateData {
+	role := string(cfg.Role)
+	data.SystemdExecStart = systemdCommandLine(cfg.BinaryPath, role, "daemon", "--config", cfg.ConfigFile)
+	data.ShellBinaryPath = shellQuote(cfg.BinaryPath)
+	data.ShellConfigFile = shellQuote(cfg.ConfigFile)
+	data.LaunchdBinaryPath = html.EscapeString(cfg.BinaryPath)
+	data.LaunchdConfigFile = html.EscapeString(cfg.ConfigFile)
+	return data
+}
+
+func systemdCommandLine(args ...string) string {
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, systemdQuoteArg(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func systemdQuoteArg(arg string) string {
+	return strings.ReplaceAll(strconv.Quote(arg), "%", "%%")
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // Install registers the tsd daemon as a system service.
@@ -85,4 +119,3 @@ func Detect() InitSystem {
 //   - launchd.go (with //go:build darwin)
 //   - rcscript.go (with //go:build freebsd)
 //   - unsupported.go (with //go:build for other platforms)
-

@@ -17,13 +17,13 @@ var systemdTemplate string
 
 func installSystemd(cfg Config) error {
 	// Build template data
-	data := templateData{
+	data := enrichTemplateData(templateData{
 		BinaryPath:  cfg.BinaryPath,
 		ConfigFile:  cfg.ConfigFile,
 		ServiceName: "tsd-" + string(cfg.Role),
 		Role:        string(cfg.Role),
 		Description: "Tailscale Metrics Discovery — " + string(cfg.Role),
-	}
+	}, cfg)
 
 	// Render template
 	tmpl, err := template.New("systemd").Parse(systemdTemplate)

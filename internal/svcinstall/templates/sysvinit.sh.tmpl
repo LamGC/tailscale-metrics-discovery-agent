@@ -13,17 +13,17 @@
 
 set -e
 
-DAEMON="{{.BinaryPath}}"
+DAEMON={{.ShellBinaryPath}}
 PIDFILE="/var/run/tsd-{{.Role}}.pid"
-CONFIG="{{.ConfigFile}}"
+CONFIG={{.ShellConfigFile}}
 
 . /lib/lsb/init-functions
 
 case "$1" in
     start)
         log_daemon_msg "Starting tsd-{{.Role}}" "tsd-{{.Role}}"
-        $DAEMON {{.Role}} daemon --config "$CONFIG" > /dev/null 2>&1 &
-        echo $! > $PIDFILE
+        "$DAEMON" {{.Role}} daemon --config "$CONFIG" > /dev/null 2>&1 &
+        echo $! > "$PIDFILE"
         log_end_msg 0
         ;;
     stop)
