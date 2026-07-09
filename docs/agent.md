@@ -50,7 +50,7 @@ tsd agent status
 
 ## 管理静态服务
 
-静态服务直接将配置的地址上报给 Central，**Prometheus 须能直接访问这些地址**。
+静态服务直接将配置的地址上报给 Central，**Prometheus 须能直接访问这些地址**。`--target` 支持普通 `host:port`，也支持 Agent 在返回服务发现结果时解析的占位符：`{ts.ip}`、`{ts.ipv6}`、`{if.link.ip:<iface>}`、`{if.link.ipv6:<iface>}`。
 
 ```bash
 # 添加单个目标
@@ -64,6 +64,11 @@ tsd agent service add redis-cluster \
   --target 10.100.0.10:9121 \
   --target 10.100.0.11:9121 \
   --label job=redis
+
+# 使用 Agent 侧占位符暴露本机 Tailscale 地址
+tsd agent service add local-node-exporter \
+  --target '{ts.ip}:9100' \
+  --label job=node-exporter
 
 # 列出所有已注册服务
 tsd agent service list

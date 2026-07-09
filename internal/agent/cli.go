@@ -36,7 +36,18 @@ func serviceAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <name>",
 		Short: "Add a static service target",
-		Args:  cobra.ExactArgs(1),
+		Long: `Add a static service target.
+
+Targets are announced to Central and must be reachable by Prometheus.
+They can be literal host:port values or use Agent-side placeholders:
+  {ts.ip}                 Tailscale IPv4
+  {ts.ipv6}               Tailscale IPv6
+  {if.link.ip:<iface>}    IPv4 of a local network interface
+  {if.link.ipv6:<iface>}  IPv6 of a local network interface`,
+		Example: `  tsd agent service add node-exporter -t 10.100.0.2:9100 -l job=node
+  tsd agent service add node-exporter -t "{ts.ip}:9100" -l job=node
+  tsd agent service add app -t "{if.link.ip:tailscale0}:8080"`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lbs, err := parseLabels(labels)
 			if err != nil {
@@ -52,7 +63,7 @@ func serviceAddCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&socket, "socket", "", "Management socket path")
-	cmd.Flags().StringArrayVarP(&targets, "target", "t", nil, "Target address(es), e.g. host:9100 (repeatable)")
+	cmd.Flags().StringArrayVarP(&targets, "target", "t", nil, "Target address(es), e.g. host:9100 or {ts.ip}:9100 (repeatable)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "Label in key=value format (repeatable)")
 	cmd.Flags().StringVar(&healthcheckURL, "healthcheck-url", "", "URL to GET periodically; 2xx = healthy")
 	_ = cmd.MarkFlagRequired("target")

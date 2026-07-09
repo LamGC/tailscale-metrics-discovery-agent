@@ -178,10 +178,10 @@ target = "http://localhost:8080/metrics"
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `name` | 是 | 服务唯一名称 |
-| `targets` | 是 | 目标地址列表，格式 `host:port` |
+| `targets` | 是 | 目标地址列表，格式 `host:port`，可使用 `{ts.ip}`、`{ts.ipv6}`、`{if.link.ip:<iface>}`、`{if.link.ipv6:<iface>}` 占位符 |
 | `labels` | 否 | 附加到 SDTarget 的标签 |
 
-直接将 `targets` 列表传给 Prometheus，**Prometheus 须能直接访问这些地址**。适合目标本身就在 Tailscale 网络中可达的情况。
+直接将 `targets` 列表传给 Prometheus，**Prometheus 须能直接访问这些地址**。占位符由 Agent 在返回 `/api/v1/services` 时解析；无法解析的 target 会被跳过。适合目标本身就在 Tailscale 网络中可达的情况。
 
 #### `[[bucket]]` — Push Bucket
 
